@@ -15,8 +15,10 @@
 data/dashboard_refresh*.log
 bot_output.log
 
-# Data directory (raw JSON exports, too large/volatile for git)
+# Data directories (raw JSON exports, too large/volatile for git)
 files/data/
+trade_arbitrage/data/
+trade_arbitrage/analysis/
 
 # macOS
 .DS_Store

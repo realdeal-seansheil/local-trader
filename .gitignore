@@ -1,0 +1,37 @@
+# Credentials & Secrets — CRITICAL
+*.pem
+*.key
+.env
+.env.*
+
+# Database (38 MB, binary, changes every 30 seconds)
+*.db
+*.sqlite
+
+# Logs & Generated
+*.log
+*.jsonl
+*.html
+data/dashboard_refresh*.log
+bot_output.log
+
+# Data directory (raw JSON exports, too large/volatile for git)
+files/data/
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Archives & Backups
+*.zip
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code local settings
+.claude/

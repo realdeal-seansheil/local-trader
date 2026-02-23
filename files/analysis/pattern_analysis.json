@@ -1,0 +1,383 @@
+{
+  "total_trades": 4000,
+  "total_buys": 2753,
+  "total_sells": 1247,
+  "buy_sell_ratio": 2.21,
+  "first_trade": "2026-02-16T11:44:53",
+  "last_trade": "2026-02-16T15:04:05",
+  "active_days": 0,
+  "most_active_hours_utc": [
+    {
+      "hour": 13,
+      "trades": 1442
+    },
+    {
+      "hour": 14,
+      "trades": 916
+    },
+    {
+      "hour": 12,
+      "trades": 833
+    },
+    {
+      "hour": 11,
+      "trades": 673
+    },
+    {
+      "hour": 15,
+      "trades": 136
+    }
+  ],
+  "most_active_days": [
+    {
+      "day": "Monday",
+      "trades": 4000
+    }
+  ],
+  "avg_trades_per_active_day": 4000,
+  "max_trades_in_a_day": 4000,
+  "active_trading_days": 1,
+  "unique_markets_traded": 50,
+  "top_markets_by_volume": [
+    {
+      "market": "Ethereum Up or Down - February 16, 11:45AM-12:00PM ET",
+      "trade_count": 215,
+      "total_size": 3277.16,
+      "avg_price": 0.5005
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 12:00PM-12:15PM ET",
+      "trade_count": 180,
+      "total_size": 1830.16,
+      "avg_price": 0.5981
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 1:30PM-1:45PM ET",
+      "trade_count": 170,
+      "total_size": 2226.71,
+      "avg_price": 0.6674
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 1:15PM-1:30PM ET",
+      "trade_count": 168,
+      "total_size": 2053.1,
+      "avg_price": 0.6384
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 11:45AM-12:00PM ET",
+      "trade_count": 164,
+      "total_size": 2257.16,
+      "avg_price": 0.5594
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 1:00PM-1:15PM ET",
+      "trade_count": 152,
+      "total_size": 1699.19,
+      "avg_price": 0.7127
+    },
+    {
+      "market": "XRP Up or Down - February 16, 1:00PM-1:15PM ET",
+      "trade_count": 141,
+      "total_size": 1130.01,
+      "avg_price": 0.5169
+    },
+    {
+      "market": "Solana Up or Down - February 16, 1:15PM-1:30PM ET",
+      "trade_count": 140,
+      "total_size": 1514.96,
+      "avg_price": 0.5531
+    },
+    {
+      "market": "Ethereum Up or Down - February 16, 12:00PM-12:15PM ET",
+      "trade_count": 136,
+      "total_size": 1444.54,
+      "avg_price": 0.5096
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 12:15PM-12:30PM ET",
+      "trade_count": 130,
+      "total_size": 1803.54,
+      "avg_price": 0.6501
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 2:15PM-2:30PM ET",
+      "trade_count": 126,
+      "total_size": 1759.91,
+      "avg_price": 0.5724
+    },
+    {
+      "market": "XRP Up or Down - February 16, 1:15PM-1:30PM ET",
+      "trade_count": 120,
+      "total_size": 973.22,
+      "avg_price": 0.5749
+    },
+    {
+      "market": "Bitcoin Up or Down - February 16, 2:00PM-2:15PM ET",
+      "trade_count": 118,
+      "total_size": 1356.51,
+      "avg_price": 0.6297
+    },
+    {
+      "market": "Solana Up or Down - February 16, 11:45AM-12:00PM ET",
+      "trade_count": 116,
+      "total_size": 1729.58,
+      "avg_price": 0.5452
+    },
+    {
+      "market": "XRP Up or Down - February 16, 1:30PM-1:45PM ET",
+      "trade_count": 115,
+      "total_size": 915.68,
+      "avg_price": 0.6577
+    },
+    {
+      "market": "Solana Up or Down - February 16, 2:00PM-2:15PM ET",
+      "trade_count": 108,
+      "total_size": 1328.04,
+      "avg_price": 0.5519
+    },
+    {
+      "market": "Solana Up or Down - February 16, 1:00PM-1:15PM ET",
+      "trade_count": 103,
+      "total_size": 1143.92,
+      "avg_price": 0.6576
+    },
+    {
+      "market": "Ethereum Up or Down - February 16, 1:15PM-1:30PM ET",
+      "trade_count": 95,
+      "total_size": 1097.71,
+      "avg_price": 0.5519
+    },
+    {
+      "market": "Solana Up or Down - February 16, 2:15PM-2:30PM ET",
+      "trade_count": 92,
+      "total_size": 1397.61,
+      "avg_price": 0.6869
+    },
+    {
+      "market": "Solana Up or Down - February 16, 1:30PM-1:45PM ET",
+      "trade_count": 87,
+      "total_size": 1098.52,
+      "avg_price": 0.6106
+    }
+  ],
+  "price_stats": {
+    "mean_entry_price": 0.5896,
+    "median_entry_price": 0.59,
+    "stdev_entry_price": 0.2095,
+    "min_price": 0.01,
+    "max_price": 0.999
+  },
+  "price_distribution": {
+    "0-10c": 63,
+    "10-20c": 133,
+    "20-30c": 180,
+    "30-40c": 306,
+    "40-50c": 677,
+    "50-60c": 773,
+    "60-70c": 628,
+    "70-80c": 535,
+    "80-90c": 452,
+    "90-100c": 253
+  },
+  "size_stats": {
+    "mean_size": 12.11,
+    "median_size": 10.0,
+    "stdev_size": 11.07,
+    "min_size": 0.01,
+    "max_size": 150,
+    "total_volume": 48435.82
+  },
+  "arbitrage_analysis": {
+    "suspected_arb_markets": 1,
+    "suspected_arb_trades": 1197,
+    "avg_arb_spread": 0.1258,
+    "examples": [
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.67,
+        "no_price": 0.3,
+        "combined": 0.97,
+        "spread_captured": 0.03,
+        "time_between_sec": 2
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.66,
+        "no_price": 0.3,
+        "combined": 0.96,
+        "spread_captured": 0.04,
+        "time_between_sec": 2
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.66,
+        "no_price": 0.3,
+        "combined": 0.96,
+        "spread_captured": 0.04,
+        "time_between_sec": 6
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.66,
+        "no_price": 0.3,
+        "combined": 0.96,
+        "spread_captured": 0.04,
+        "time_between_sec": 6
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.66,
+        "no_price": 0.3,
+        "combined": 0.96,
+        "spread_captured": 0.04,
+        "time_between_sec": 6
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.68,
+        "no_price": 0.3,
+        "combined": 0.98,
+        "spread_captured": 0.02,
+        "time_between_sec": 10
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.42,
+        "no_price": 0.3,
+        "combined": 0.72,
+        "spread_captured": 0.28,
+        "time_between_sec": 158
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.42,
+        "no_price": 0.3,
+        "combined": 0.72,
+        "spread_captured": 0.28,
+        "time_between_sec": 158
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.42,
+        "no_price": 0.3,
+        "combined": 0.72,
+        "spread_captured": 0.28,
+        "time_between_sec": 158
+      },
+      {
+        "market": "Ethereum Up or Down - February 16, 3:00PM-3:15PM ET",
+        "yes_price": 0.47,
+        "no_price": 0.3,
+        "combined": 0.77,
+        "spread_captured": 0.23,
+        "time_between_sec": 174
+      }
+    ],
+    "total_estimated_arb_profit_per_dollar": 150.5834
+  },
+  "outcome_distribution": {
+    "Down": 1788,
+    "Up": 2212
+  },
+  "market_categories": {
+    "counts": {
+      "crypto": 4000
+    },
+    "percentages": {
+      "crypto": 100.0
+    }
+  },
+  "trade_clustering": {
+    "total_clusters": 12,
+    "avg_cluster_size": 333.3,
+    "max_cluster_size": 673,
+    "recent_clusters": [
+      {
+        "size": 354,
+        "duration_sec": 712,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T12:15:11"
+      },
+      {
+        "size": 34,
+        "duration_sec": 32,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T12:56:31"
+      },
+      {
+        "size": 476,
+        "duration_sec": 714,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T13:00:09"
+      },
+      {
+        "size": 523,
+        "duration_sec": 710,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T13:15:13"
+      },
+      {
+        "size": 443,
+        "duration_sec": 706,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T13:30:07"
+      },
+      {
+        "size": 366,
+        "duration_sec": 684,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T14:00:35"
+      },
+      {
+        "size": 335,
+        "duration_sec": 368,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T14:20:55"
+      },
+      {
+        "size": 40,
+        "duration_sec": 114,
+        "markets_involved": 3,
+        "timestamp": "2026-02-16T14:40:07"
+      },
+      {
+        "size": 175,
+        "duration_sec": 112,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T14:55:11"
+      },
+      {
+        "size": 136,
+        "duration_sec": 236,
+        "markets_involved": 4,
+        "timestamp": "2026-02-16T15:00:09"
+      }
+    ]
+  },
+  "strategy_profile": {
+    "strategy_type": "arbitrage_primary",
+    "confidence": "high",
+    "key_parameters": {
+      "avg_spread_target": 0.1258,
+      "execution_speed_required": "sub-second",
+      "dominant_price_range": "50-60c",
+      "market_category_weights": {
+        "crypto": 100.0
+      },
+      "peak_trading_hours_utc": [
+        13,
+        14,
+        12
+      ],
+      "typical_position_size": 10.0,
+      "max_position_size": 150
+    },
+    "recommendations_for_kalshi": [
+      "Look for mispricings between Kalshi YES + NO prices summing to < $1.00",
+      "Monitor new/illiquid markets where pricing inefficiency is highest",
+      "Focus on markets with thin order books and wide bid-ask spreads",
+      "Need fast execution \u2014 use WebSocket feeds for real-time orderbook data",
+      "Kalshi fee structure may eat into thin arbitrage margins \u2014 calculate net profit per trade"
+    ]
+  }
+}

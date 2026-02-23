@@ -6,7 +6,7 @@ Based on distinct-baguette's Polymarket strategy analysis.
 
 Usage:
   python main.py straddle   # Run one cycle: enter → monitor → exit
-  python main.py loop       # Continuous: repeat every quarter hour
+  python main.py loop       # Continuous: scan all series, enter/exit in real time
   python main.py status     # Show open positions and daily stats
   python main.py history    # Show completed straddle history
 """
@@ -47,52 +47,20 @@ def cmd_straddle():
 
 
 def cmd_loop():
-    """Continuous mode: run straddle every quarter hour."""
+    """Continuous mode: scan all series, enter/exit in real time."""
     from straddle_executor import StraddleExecutor
-    from config import OBSERVATION_MODE, MAX_DAILY_STRADDLES
+    from config import OBSERVATION_MODE
 
     print(f"=== Crypto Straddle Bot — CONTINUOUS MODE ===")
     print(f"Mode: {'OBSERVATION' if OBSERVATION_MODE else '*** LIVE ***'}")
-    print(f"Max daily straddles: {MAX_DAILY_STRADDLES}")
     print(f"Press Ctrl+C to stop.\n")
 
     executor = StraddleExecutor()
-    cycle_count = 0
 
     try:
-        while True:
-            # Check daily limit
-            stats = executor.tracker.get_daily_stats()
-            if stats["daily_straddles"] >= MAX_DAILY_STRADDLES:
-                print(f"\n  Daily limit reached ({MAX_DAILY_STRADDLES}). "
-                      f"Sleeping until tomorrow...")
-                # Sleep until midnight + 1 minute
-                now = datetime.now()
-                tomorrow = now.replace(hour=0, minute=1, second=0, microsecond=0)
-                if tomorrow <= now:
-                    from datetime import timedelta
-                    tomorrow += timedelta(days=1)
-                time.sleep((tomorrow - now).total_seconds())
-                continue
-
-            # Wait for next quarter hour
-            next_q = executor.wait_for_quarter_hour()
-            cycle_count += 1
-            print(f"\n  === Cycle #{cycle_count} at {next_q.strftime('%H:%M:%S')} ===")
-
-            # Run the cycle
-            pos = executor.run_single_cycle()
-
-            if pos:
-                print(f"\n  Cycle #{cycle_count} complete.")
-            else:
-                print(f"\n  Cycle #{cycle_count}: no straddle this period.")
-
-            # Brief pause before next cycle
-            time.sleep(5)
-
+        executor.run_continuous()
     except KeyboardInterrupt:
-        print(f"\n\nStopped after {cycle_count} cycles.")
+        print(f"\n\nStopped.")
         executor.tracker.print_status()
 
 

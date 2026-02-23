@@ -39,6 +39,7 @@ from config import (
     POLL_INTERVAL_SECONDS, EXIT_BEFORE_CLOSE_SECONDS, MAX_DAILY_STRADDLES,
     MAX_DAILY_EXPOSURE_CENTS, OBSERVATION_MODE, SCAN_BEFORE_QUARTER_SECONDS,
     ENTRY_WINDOW_SECONDS, KALSHI_FEE_RATE, DATA_DIR,
+    LOOP_INTERVAL_SECONDS, MAX_SIMULTANEOUS_POSITIONS, SCAN_COOLDOWN_SECONDS,
 )
 from position_tracker import PositionTracker
 
@@ -164,13 +165,20 @@ class StraddleExecutor:
 
         return best_market, best_ob
 
+    def _derive_series(self, ticker):
+        """Derive series from ticker (e.g. KXBTC15M-26FEB231245-45 → KXBTC15M)."""
+        for series in CRYPTO_SERIES:
+            if ticker.startswith(series):
+                return series
+        return ticker.split("-")[0] if "-" in ticker else ticker
+
     def enter_straddle(self, market, ob):
         """
         Enter a straddle: buy both YES and NO.
         Returns StraddlePosition or None.
         """
         ticker = market["ticker"]
-        series = market.get("series_ticker", "")
+        series = market.get("series_ticker") or self._derive_series(ticker)
         title = market.get("title", "")
         close_time = market.get("close_time")
         contracts = MAX_CONTRACTS_PER_SIDE
@@ -185,15 +193,16 @@ class StraddleExecutor:
         print(f"    Contracts: {contracts} per side")
         print(f"    Total cost: {combined * contracts}c (${combined * contracts / 100:.2f})")
 
-        # Check daily limits
-        stats = self.tracker.get_daily_stats()
-        if stats["daily_straddles"] >= MAX_DAILY_STRADDLES:
-            print(f"    SKIP: Daily straddle limit reached ({MAX_DAILY_STRADDLES})")
-            return None
-        if stats["daily_exposure_cents"] + combined * contracts > MAX_DAILY_EXPOSURE_CENTS:
-            print(f"    SKIP: Would exceed daily exposure limit "
-                  f"(${MAX_DAILY_EXPOSURE_CENTS/100:.2f})")
-            return None
+        # Check daily limits (skip in observation mode — collect max data)
+        if not OBSERVATION_MODE:
+            stats = self.tracker.get_daily_stats()
+            if stats["daily_straddles"] >= MAX_DAILY_STRADDLES:
+                print(f"    SKIP: Daily straddle limit reached ({MAX_DAILY_STRADDLES})")
+                return None
+            if stats["daily_exposure_cents"] + combined * contracts > MAX_DAILY_EXPOSURE_CENTS:
+                print(f"    SKIP: Would exceed daily exposure limit "
+                      f"(${MAX_DAILY_EXPOSURE_CENTS/100:.2f})")
+                return None
 
         if OBSERVATION_MODE:
             print(f"    [OBSERVATION MODE — logging entry, not executing]")
@@ -473,7 +482,242 @@ class StraddleExecutor:
         print(f"    Status: {pos.status}{obs_tag}")
 
     # ==========================================================
-    # FULL CYCLE
+    # CONTINUOUS MODE — non-blocking scan + monitor loop
+    # ==========================================================
+
+    def _seconds_to_close(self, pos):
+        """Return seconds until market close, or inf if unknown."""
+        if not pos.market_close_time:
+            return float('inf')
+        try:
+            close_str = pos.market_close_time
+            if close_str.endswith("Z"):
+                close_str = close_str[:-1] + "+00:00"
+            close_dt = datetime.fromisoformat(close_str)
+            close_utc_ts = calendar.timegm(close_dt.timetuple())
+            now_utc_ts = calendar.timegm(datetime.utcnow().timetuple())
+            return close_utc_ts - now_utc_ts
+        except Exception:
+            return float('inf')
+
+    def _is_market_expired(self, pos):
+        """Return True if the market close time has passed."""
+        return self._seconds_to_close(pos) <= 0
+
+    def check_position_exits(self):
+        """
+        Non-blocking, single-pass exit check across ALL open positions.
+        Checks each position once for exit triggers and executes any exits.
+        Also logs tick data for each position.
+
+        Returns list of (pos, exit_side, exit_price, exit_reason) for exits.
+        """
+        open_positions = self.tracker.get_open_positions()
+        exits = []
+
+        for pos in open_positions:
+            ticker = pos.ticker
+
+            # Get fresh orderbook
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception as e:
+                print(f"    [{ticker}] orderbook error: {e}")
+                continue
+
+            if ob is None:
+                # Empty orderbook — market may have settled
+                if self._is_market_expired(pos):
+                    print(f"    [{ticker}] market expired, closing at expiry")
+                    self.tracker.close_at_expiry(ticker)
+                continue
+
+            # Current prices
+            current_yes_bid = ob["yes_bid"]
+            current_no_bid = ob["no_bid"]
+
+            # P&L
+            yes_pnl = current_yes_bid - pos.yes_entry_price
+            no_pnl = current_no_bid - pos.no_entry_price
+
+            # Log tick
+            entry_dt = datetime.fromisoformat(pos.entry_time)
+            elapsed = (datetime.now() - entry_dt).total_seconds()
+            tick_log = os.path.join(DATA_DIR, f"ticks_{ticker}.jsonl")
+            tick_entry = {
+                "ts": datetime.now().isoformat(),
+                "elapsed_s": round(elapsed, 1),
+                "yes_bid": current_yes_bid,
+                "no_bid": current_no_bid,
+                "yes_pnl": yes_pnl,
+                "no_pnl": no_pnl,
+                "yes_depth": ob["yes_bid_depth"],
+                "no_depth": ob["no_bid_depth"],
+            }
+            with open(tick_log, "a") as f:
+                f.write(json.dumps(tick_entry) + "\n")
+
+            # === EXIT TRIGGERS ===
+
+            # Trigger A: YES profit target
+            if yes_pnl >= EXIT_PROFIT_TARGET_CENTS:
+                print(f"    [{ticker}] EXIT: YES +{yes_pnl}c hit target")
+                exits.append((pos, "yes", current_yes_bid, f"profit_target_yes_{yes_pnl}c"))
+                continue
+
+            # Trigger B: NO profit target
+            if no_pnl >= EXIT_PROFIT_TARGET_CENTS:
+                print(f"    [{ticker}] EXIT: NO +{no_pnl}c hit target")
+                exits.append((pos, "no", current_no_bid, f"profit_target_no_{no_pnl}c"))
+                continue
+
+            # Trigger C: Market close approaching
+            secs_to_close = self._seconds_to_close(pos)
+            if secs_to_close < EXIT_BEFORE_CLOSE_SECONDS:
+                print(f"    [{ticker}] EXIT: market closing in {secs_to_close:.0f}s")
+                exits.append((pos, "both", None, f"market_close_{secs_to_close:.0f}s"))
+                continue
+
+            # Trigger D: Timeout from entry
+            if elapsed >= EXIT_TIMEOUT_SECONDS:
+                print(f"    [{ticker}] EXIT: timeout ({elapsed:.0f}s)")
+                exits.append((pos, "both", None, "timeout"))
+                continue
+
+        # Execute all triggered exits
+        for pos, exit_side, exit_price, exit_reason in exits:
+            self.exit_straddle(pos, exit_side, exit_price, exit_reason)
+
+        return exits
+
+    def scan_for_entries(self):
+        """
+        Scan all crypto series for entry opportunities.
+        Skips any series where we already have an open position.
+        Respects per-series cooldown after exit.
+
+        Returns list of positions entered this tick.
+        """
+        open_positions = self.tracker.get_open_positions()
+        open_series = {pos.series for pos in open_positions}
+        open_tickers = {pos.ticker for pos in open_positions}
+
+        # Respect max simultaneous positions
+        if len(open_positions) >= MAX_SIMULTANEOUS_POSITIONS:
+            return []
+
+        # Daily limit check (live mode only)
+        if not OBSERVATION_MODE:
+            stats = self.tracker.get_daily_stats()
+            if stats["daily_straddles"] >= MAX_DAILY_STRADDLES:
+                return []
+
+        new_entries = []
+
+        for series in CRYPTO_SERIES:
+            if series in open_series:
+                continue  # Already have a position in this series
+
+            # Check cooldown
+            if hasattr(self, '_series_cooldowns') and series in self._series_cooldowns:
+                elapsed = (datetime.now() - self._series_cooldowns[series]).total_seconds()
+                if elapsed < SCAN_COOLDOWN_SECONDS:
+                    continue
+
+            # Fetch open market for this series
+            try:
+                result = self.client.get_markets(
+                    status="open", limit=1, series_ticker=series
+                )
+                markets = result.get("markets", [])
+            except Exception:
+                continue
+
+            if not markets:
+                continue
+
+            market = markets[0]
+            ticker = market.get("ticker", "")
+
+            # Skip if already tracking this ticker (defensive)
+            if ticker in open_tickers or ticker in self.tracker.positions:
+                continue
+
+            # Get orderbook and check entry criteria
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception:
+                continue
+
+            if ob is None:
+                continue
+
+            if ob["combined_ask"] > MAX_COMBINED_ENTRY_CENTS:
+                continue
+            if ob["yes_bid_depth"] < MIN_ORDERBOOK_DEPTH:
+                continue
+            if ob["no_bid_depth"] < MIN_ORDERBOOK_DEPTH:
+                continue
+
+            # Enter!
+            pos = self.enter_straddle(market, ob)
+            if pos:
+                new_entries.append(pos)
+
+        return new_entries
+
+    def run_continuous(self):
+        """
+        Unified continuous event loop for the straddle bot.
+
+        On each tick (~3s):
+          1. Check all open positions for exit triggers
+          2. Scan for new entry opportunities on available series
+          3. Sleep
+
+        Handles up to 4 simultaneous straddles (one per series).
+        Market rollovers are automatic: expired position gets archived,
+        series becomes available, next scan enters the new market.
+        """
+        self._series_cooldowns = {}  # series -> datetime of last exit
+        loop_count = 0
+
+        print(f"\n  Continuous mode started.")
+        print(f"  Loop interval: {LOOP_INTERVAL_SECONDS}s")
+        print(f"  Max positions: {MAX_SIMULTANEOUS_POSITIONS}")
+        print(f"  Mode: {'OBSERVATION' if OBSERVATION_MODE else '*** LIVE ***'}")
+        print()
+
+        while True:
+            loop_count += 1
+
+            # Step 1: Check exits on all open positions
+            exits = self.check_position_exits()
+
+            # Record cooldowns for exited series
+            for pos, _, _, _ in exits:
+                self._series_cooldowns[pos.series] = datetime.now()
+
+            # Step 2: Scan for new entries
+            new_entries = self.scan_for_entries()
+
+            # Step 3: Periodic status print (~every 5 min at 3s interval)
+            if loop_count % 100 == 1:
+                now = datetime.now().strftime('%H:%M:%S')
+                open_pos = self.tracker.get_open_positions()
+                open_str = ", ".join(f"{p.series}" for p in open_pos) if open_pos else "none"
+                stats = self.tracker.get_daily_stats()
+                print(f"  [{now}] loop #{loop_count} | "
+                      f"open: {open_str} | "
+                      f"daily: {stats['daily_straddles']} straddles")
+
+            # Step 4: Sleep
+            time.sleep(LOOP_INTERVAL_SECONDS)
+
+    # ==========================================================
+    # SINGLE CYCLE (for cmd_straddle — unchanged)
     # ==========================================================
 
     def run_single_cycle(self):

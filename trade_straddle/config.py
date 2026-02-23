@@ -56,6 +56,13 @@ SCAN_BEFORE_QUARTER_SECONDS = 10  # Start scanning 10s before :00/:15/:30/:45
 ENTRY_WINDOW_SECONDS = 30         # Must enter within 30s of market open
 
 # ============================================================
+# CONTINUOUS MODE
+# ============================================================
+LOOP_INTERVAL_SECONDS = 3        # Main loop tick interval (scan + monitor)
+MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
+SCAN_COOLDOWN_SECONDS = 15       # After exit, wait before re-entering same series
+
+# ============================================================
 # KALSHI FEE
 # ============================================================
 KALSHI_FEE_RATE = 0.007           # 0.7% per leg

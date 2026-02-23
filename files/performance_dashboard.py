@@ -92,6 +92,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 12',
         'label': 'Pure Era 2: conviction Kelly, min 2 contracts, no penalty/feedback',
         'start': '2026-02-23T01:30:00+00:00',
+        'end': '2026-02-23T15:00:00+00:00',
+    },
+    {
+        'name': 'Era 13',
+        'label': 'Sniper: 41-47c only, no XRP, max 5 contracts',
+        'start': '2026-02-23T15:00:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

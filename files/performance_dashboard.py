@@ -98,6 +98,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 13',
         'label': 'Sniper: 41-47c only, no XRP, max 5 contracts',
         'start': '2026-02-23T15:00:00+00:00',
+        'end': '2026-02-23T20:30:00+00:00',
+    },
+    {
+        'name': 'Era 14',
+        'label': 'Era 2 revival: 41-55c, all 4 assets, max 10 contracts',
+        'start': '2026-02-23T20:30:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

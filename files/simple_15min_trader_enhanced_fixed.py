@@ -30,7 +30,7 @@ STRIKE_PATTERN = re.compile(r'\$([0-9]{1,3}(?:,?[0-9]{3})*(?:\.[0-9]{1,2})?)')
 # ============================================================
 
 # 15-minute crypto series
-CRYPTO_15MIN_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M']  # Era 13: dropped XRP (18.3% WR in Era 10-12, -$28.25)
+CRYPTO_15MIN_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # Era 14: XRP restored (50% WR in Era 2; poor Eras 10-12 was broken configs, not XRP)
 
 # Trading parameters
 SCAN_INTERVAL = 30              # 30-second scans
@@ -45,7 +45,7 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = False       # Era 13: Sniper Mode — live, 41-47c band only
+OBSERVATION_MODE = False       # Era 14: live — Era 2 revival (41-55c, all 4 assets, max 10)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -71,12 +71,12 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 # === LAYER 1: Trade Quality Gates ===
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
-MIN_ENTRY_PRICE = 41                 # Era 13: Sniper Mode — only the proven profitable band
-MAX_ENTRY_PRICE = 47                 # Era 13: 41-47c was 48.2% WR, +$5.08 in paper trading
+MIN_ENTRY_PRICE = 41                 # Era 14: keep 41c floor (below was 32.5% WR in Era 2)
+MAX_ENTRY_PRICE = 55                 # Era 14: restore 48-55c zone (63.6% WR, +$24.43 in Era 2 — best band)
 IDEAL_ENTRY_MIN = 42                 # Logged for analysis only
 IDEAL_ENTRY_MAX = 47                 # Logged for analysis only
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
-MAX_CONTRACTS_CEILING = 5            # Era 13: tight cap at $54 balance — protect capital while proving the edge
+MAX_CONTRACTS_CEILING = 10           # Era 14: headroom for growth (Kelly keeps actual sizing at 2-4 at $53; Era 2 avg was 2.81)
 STRONG_RISK_PCT = 0.035              # Strong conviction: risk up to 3.5% of balance per trade
 WEAK_RISK_PCT = 0.020                # Weak conviction: risk up to 2.0% of balance per trade
 BASE_RISK_PCT = 0.015                # Era 10: raised from 0.010 — let 'none' agreement trades get 1-2 contracts

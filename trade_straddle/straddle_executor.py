@@ -408,8 +408,10 @@ class StraddleExecutor:
                 self.tracker.close_at_expiry(ticker)
                 return
         else:
-            # Sell the profitable side
+            # Sell the profitable side, hold remaining to expiry
             self._execute_sell(pos, exit_side, exit_price, contracts)
+            other_side = "NO" if exit_side == "yes" else "YES"
+            print(f"    Holding {contracts}x {other_side} to expiry")
 
         # Print P&L summary
         self._print_pnl_summary(pos)
@@ -506,16 +508,23 @@ class StraddleExecutor:
 
     def check_position_exits(self):
         """
-        Non-blocking, single-pass exit check across ALL open positions.
-        Checks each position once for exit triggers and executes any exits.
-        Also logs tick data for each position.
+        Non-blocking, single-pass exit check across ALL positions.
+
+        Position lifecycle:
+          "open"         → actively monitoring, check profit targets
+          "partial_exit" → one side sold, holding remaining to expiry
+          "closed"/"expired" → done, skip
 
         Returns list of (pos, exit_side, exit_price, exit_reason) for exits.
         """
-        open_positions = self.tracker.get_open_positions()
         exits = []
 
-        for pos in open_positions:
+        # --- Pass 1: ACTIVE positions (status == "open") ---
+        # Check profit targets, timeout, market close
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "open":
+                continue
+
             ticker = pos.ticker
 
             # Get fresh orderbook
@@ -527,7 +536,6 @@ class StraddleExecutor:
                 continue
 
             if ob is None:
-                # Empty orderbook — market may have settled
                 if self._is_market_expired(pos):
                     print(f"    [{ticker}] market expired, closing at expiry")
                     self.tracker.close_at_expiry(ticker)
@@ -558,7 +566,7 @@ class StraddleExecutor:
             with open(tick_log, "a") as f:
                 f.write(json.dumps(tick_entry) + "\n")
 
-            # === EXIT TRIGGERS ===
+            # === EXIT TRIGGERS (only for "open" positions) ===
 
             # Trigger A: YES profit target
             if yes_pnl >= EXIT_PROFIT_TARGET_CENTS:
@@ -579,7 +587,7 @@ class StraddleExecutor:
                 exits.append((pos, "both", None, f"market_close_{secs_to_close:.0f}s"))
                 continue
 
-            # Trigger D: Timeout from entry
+            # Trigger D: Timeout — sell both sides
             if elapsed >= EXIT_TIMEOUT_SECONDS:
                 print(f"    [{ticker}] EXIT: timeout ({elapsed:.0f}s)")
                 exits.append((pos, "both", None, "timeout"))
@@ -589,22 +597,37 @@ class StraddleExecutor:
         for pos, exit_side, exit_price, exit_reason in exits:
             self.exit_straddle(pos, exit_side, exit_price, exit_reason)
 
+        # --- Pass 2: HOLDING positions (status == "partial_exit") ---
+        # Only check for market expiry — no more active trading
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "partial_exit":
+                continue
+
+            if self._is_market_expired(pos):
+                print(f"    [{pos.ticker}] holding expired, settling")
+                self.tracker.close_at_expiry(pos.ticker)
+            elif self._seconds_to_close(pos) < EXIT_BEFORE_CLOSE_SECONDS:
+                print(f"    [{pos.ticker}] holding → market closing, settling")
+                self.tracker.close_at_expiry(pos.ticker)
+
         return exits
 
     def scan_for_entries(self):
         """
         Scan all crypto series for entry opportunities.
-        Skips any series where we already have an open position.
+        Skips any series where we already have a position (open or holding).
         Respects per-series cooldown after exit.
 
         Returns list of positions entered this tick.
         """
-        open_positions = self.tracker.get_open_positions()
-        open_series = {pos.series for pos in open_positions}
-        open_tickers = {pos.ticker for pos in open_positions}
+        # Skip series with ANY active position (open, partial_exit, etc.)
+        active_positions = [p for p in self.tracker.positions.values()
+                           if p.status in ("open", "partial_exit")]
+        open_series = {pos.series for pos in active_positions}
+        open_tickers = {pos.ticker for pos in active_positions}
 
         # Respect max simultaneous positions
-        if len(open_positions) >= MAX_SIMULTANEOUS_POSITIONS:
+        if len(active_positions) >= MAX_SIMULTANEOUS_POSITIONS:
             return []
 
         # Daily limit check (live mode only)

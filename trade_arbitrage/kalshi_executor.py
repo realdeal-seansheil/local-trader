@@ -29,7 +29,8 @@ _DEFAULT_KEY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath
 KALSHI_PRIVATE_KEY_PATH = os.environ.get("KALSHI_PRIVATE_KEY_PATH", _DEFAULT_KEY_PATH)
 
 # Use demo for testing, production for live trading
-USE_DEMO = True
+USE_DEMO = False  # Live API — real market data for scanning
+OBSERVATION_MODE = True  # Log opportunities but do NOT place orders
 BASE_URL = "https://demo-api.kalshi.co/trade-api/v2" if USE_DEMO else "https://api.elections.kalshi.com/trade-api/v2"
 
 # Risk controls — conservative for $10 allocation on shared $54 balance
@@ -245,6 +246,19 @@ class KalshiClient:
             order_type: "limit" or "market"
         """
         self._reset_daily_limits()
+
+        # Observation mode — log but don't execute
+        if OBSERVATION_MODE:
+            obs_entry = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "mode": "observation",
+                "order": {"ticker": ticker, "side": side, "action": action,
+                          "count": count, "price": price, "type": order_type},
+            }
+            log_file = os.path.join(DATA_DIR, "observation_orders.jsonl")
+            with open(log_file, "a") as f:
+                f.write(json.dumps(obs_entry, default=str) + "\n")
+            return {"observation": True, "would_have_placed": obs_entry["order"]}
 
         # Safety checks
         if self.daily_trades >= MAX_DAILY_TRADES:

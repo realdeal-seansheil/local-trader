@@ -12,6 +12,7 @@ Usage:
   python main.py analyze    # Run pattern analysis on fetched data
   python main.py monitor    # Start live monitoring for new trades
   python main.py scan       # Scan Kalshi for current opportunities
+  python main.py openscan   # Market-open scanner: aggressive arb detection at quarter hours
   python main.py run        # Full pipeline: fetch → analyze → scan
   python main.py live       # Monitor + auto-execute on Kalshi (USE WITH CAUTION)
 """
@@ -112,7 +113,7 @@ def cmd_scan():
 
     for i, opp in enumerate(report.get("top_opportunities", [])[:5]):
         print(f"\n  {i+1}. {opp['title']}")
-        print(f"     YES: {opp['yes_price_cents']}c | NO: {opp['no_price_cents']}c | Spread: {opp['spread']}")
+        print(f"     YES ask: {opp['yes_ask_cents']}c | NO ask: {opp['no_ask_cents']}c | Spread: {opp['spread']}")
 
     return report
 
@@ -143,6 +144,22 @@ def cmd_monitor():
             print(" no new trades")
 
         time.sleep(60)
+
+
+def cmd_openscan():
+    """Market-open scanner: aggressive arb detection at quarter hours."""
+    print("\n" + "=" * 60)
+    print("MARKET-OPEN SCANNER: Crypto 15-Min Arb Detection")
+    print("=" * 60)
+    from kalshi_executor import KalshiAuth, KalshiClient, KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH, OBSERVATION_MODE
+    from market_open_scanner import MarketOpenScanner
+
+    print(f"\nMode: {'OBSERVATION' if OBSERVATION_MODE else '*** LIVE ***'}")
+
+    auth = KalshiAuth(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
+    client = KalshiClient(auth)
+    scanner = MarketOpenScanner(client)
+    scanner.run()
 
 
 def cmd_run():
@@ -270,6 +287,7 @@ COMMANDS = {
     "fetch": cmd_fetch,
     "analyze": cmd_analyze,
     "scan": cmd_scan,
+    "openscan": cmd_openscan,
     "monitor": cmd_monitor,
     "run": cmd_run,
     "live": cmd_live,

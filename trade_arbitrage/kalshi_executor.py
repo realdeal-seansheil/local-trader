@@ -326,8 +326,14 @@ class StrategyExecutor:
 
     def find_arb_opportunities(self) -> list:
         """
-        Scan Kalshi markets for arbitrage opportunities
-        (YES + NO < $1.00 after fees).
+        Scan Kalshi markets for arbitrage opportunities using orderbook depth.
+
+        On Kalshi, the orderbook shows bids for YES and bids for NO.
+        To BUY both sides (arb), the implied ask prices are:
+          YES ask = 100 - max_no_bid
+          NO ask  = 100 - max_yes_bid
+        Arb exists when yes_ask + no_ask < 100c (i.e., max_yes_bid + max_no_bid > 100).
+
         Only returns opportunities that are profitable AFTER Kalshi's 0.7% fee.
         """
         opportunities = []
@@ -336,29 +342,46 @@ class StrategyExecutor:
 
         for market in markets:
             ticker = market.get("ticker", "")
-            yes_price = market.get("yes_price", 0)  # In cents
-            no_price = market.get("no_price", 0)
+            title = market.get("title", "")
 
-            if yes_price and no_price:
-                combined = (yes_price + no_price) / 100  # Convert to dollars
-                if combined < 1.0 - MIN_SPREAD_FOR_ARB:
-                    # Check profitability after fees
-                    profitability = calculate_arb_profitability(yes_price, no_price, count=1)
-                    if not profitability["profitable_after_fees"]:
-                        continue  # Skip — fees eat the spread
+            try:
+                ob = self.client.get_orderbook(ticker)
+            except Exception:
+                continue
 
-                    spread = round(1.0 - combined, 4)
-                    opportunities.append({
-                        "ticker": ticker,
-                        "title": market.get("title", ""),
-                        "yes_price_cents": yes_price,
-                        "no_price_cents": no_price,
-                        "combined": round(combined, 4),
-                        "spread": spread,
-                        "net_profit_per_contract": profitability["net_profit_per_contract"],
-                        "roi_net_percent": profitability["roi_net_percent"],
-                        "volume": market.get("volume", 0),
-                    })
+            yes_bids = ob.get("orderbook", {}).get("yes", [])
+            no_bids = ob.get("orderbook", {}).get("no", [])
+
+            if not yes_bids or not no_bids:
+                continue
+
+            # Find highest bids on each side
+            max_yes_bid = max(b[0] for b in yes_bids)
+            max_no_bid = max(b[0] for b in no_bids)
+
+            # Implied ask prices
+            yes_ask = 100 - max_no_bid
+            no_ask = 100 - max_yes_bid
+            combined_ask = yes_ask + no_ask  # in cents
+
+            if combined_ask < 100 - int(MIN_SPREAD_FOR_ARB * 100):
+                # Check profitability after fees
+                profitability = calculate_arb_profitability(yes_ask, no_ask, count=1)
+                if not profitability["profitable_after_fees"]:
+                    continue
+
+                spread = round((100 - combined_ask) / 100.0, 4)
+                opportunities.append({
+                    "ticker": ticker,
+                    "title": title,
+                    "yes_ask_cents": yes_ask,
+                    "no_ask_cents": no_ask,
+                    "combined_ask_cents": combined_ask,
+                    "spread": spread,
+                    "net_profit_per_contract": profitability["net_profit_per_contract"],
+                    "roi_net_percent": profitability["roi_net_percent"],
+                    "volume": market.get("volume", 0),
+                })
 
         # Sort by net profit per contract (best first)
         opportunities.sort(key=lambda x: x["net_profit_per_contract"], reverse=True)
@@ -381,7 +404,11 @@ class StrategyExecutor:
 
     def execute_arb(self, ticker: str, count: int = 5) -> dict:
         """
-        Execute an arbitrage trade: buy both YES and NO.
+        Execute an arbitrage trade: buy both YES and NO at implied ask prices.
+
+        On Kalshi, to buy YES you place a limit order at the YES ask price.
+        The YES ask = 100 - max_no_bid (taking the best NO bidder's offer).
+
         Includes balance check and fee-aware profitability check.
         """
         # Get fresh orderbook
@@ -396,42 +423,45 @@ class StrategyExecutor:
         if not yes_bids or not no_bids:
             return {"error": "Insufficient liquidity"}
 
-        # Best available prices
-        best_yes_price = yes_bids[0][0] if yes_bids else None
-        best_no_price = no_bids[0][0] if no_bids else None
+        # Find highest bids
+        max_yes_bid = max(b[0] for b in yes_bids)
+        max_no_bid = max(b[0] for b in no_bids)
 
-        if not best_yes_price or not best_no_price:
-            return {"error": "No valid prices"}
+        # Implied ask prices
+        yes_ask = 100 - max_no_bid
+        no_ask = 100 - max_yes_bid
+        combined_ask = yes_ask + no_ask  # in cents
 
-        combined = (best_yes_price + best_no_price) / 100
-        if combined >= 1.0 - MIN_SPREAD_FOR_ARB:
-            return {"error": f"Spread too thin: {combined:.4f}"}
+        if combined_ask >= 100 - int(MIN_SPREAD_FOR_ARB * 100):
+            return {"error": f"Spread too thin: combined ask = {combined_ask}c"}
 
         # Check profitability after fees
-        profitability = calculate_arb_profitability(best_yes_price, best_no_price, count)
+        profitability = calculate_arb_profitability(yes_ask, no_ask, count)
         if not profitability["profitable_after_fees"]:
             return {"error": f"Not profitable after fees: net {profitability['net_profit_per_contract']:.4f}/contract"}
 
         # Check balance allocation
-        ok, msg = self.check_balance_for_arb(count, best_yes_price, best_no_price)
+        ok, msg = self.check_balance_for_arb(count, yes_ask, no_ask)
         if not ok:
             return {"error": msg}
 
-        # Execute both legs
+        # Execute both legs — buy YES at yes_ask, buy NO at no_ask
         yes_result = self.client.place_order(
             ticker=ticker, side="yes", action="buy",
-            count=count, price=best_yes_price
+            count=count, price=yes_ask
         )
 
         no_result = self.client.place_order(
             ticker=ticker, side="no", action="buy",
-            count=count, price=best_no_price
+            count=count, price=no_ask
         )
 
         return {
             "yes_order": yes_result,
             "no_order": no_result,
-            "combined_price": combined,
+            "yes_ask_price": yes_ask,
+            "no_ask_price": no_ask,
+            "combined_ask_cents": combined_ask,
             "gross_profit_per_contract": profitability["gross_profit_per_contract"],
             "net_profit_per_contract": profitability["net_profit_per_contract"],
             "total_fees": profitability["total_fees"],
@@ -483,8 +513,8 @@ if __name__ == "__main__":
         for i, opp in enumerate(report["top_opportunities"][:5]):
             print(f"  {i+1}. {opp['title']}")
             print(f"     Ticker: {opp['ticker']}")
-            print(f"     YES: {opp['yes_price_cents']}c | NO: {opp['no_price_cents']}c")
-            print(f"     Combined: ${opp['combined']} | Spread: {opp['spread']}")
+            print(f"     YES ask: {opp['yes_ask_cents']}c | NO ask: {opp['no_ask_cents']}c")
+            print(f"     Combined ask: {opp['combined_ask_cents']}c | Spread: {opp['spread']}")
             print(f"     Volume: {opp['volume']}")
             print()
 

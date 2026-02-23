@@ -19,6 +19,7 @@ bot_output.log
 files/data/
 trade_arbitrage/data/
 trade_arbitrage/analysis/
+trade_straddle/data/
 
 # macOS
 .DS_Store

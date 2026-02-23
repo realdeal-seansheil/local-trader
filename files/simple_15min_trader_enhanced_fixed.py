@@ -45,7 +45,7 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = False       # Era 14: live — Era 2 revival (41-55c, all 4 assets, max 10)
+OBSERVATION_MODE = True        # Era 15: OBSERVATION — Signal E killed, Signal D neutered, validating before live
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -141,7 +141,7 @@ TREND_30M_LOOKBACK = 1800            # 30 minutes of spot price history
 TREND_2H_LOOKBACK = 7200             # 2 hours of spot price history
 TREND_30M_MULTIPLIER = 15            # Sensitivity for 30-min trend (vs 30 for 5-min momentum)
 TREND_2H_MULTIPLIER = 8              # Sensitivity for 2-hr trend (more dampened)
-SIGNAL_TREND_WEIGHT = 0.10           # Base weight for Signal E in the adaptive weight blend
+SIGNAL_TREND_WEIGHT = 0.0            # Era 15: DISABLED — Signal E had zero predictive power (0.468 win vs 0.467 loss), pure noise
 
 # === PERFORMANCE FEEDBACK (Era 7, fixed in Era 9) ===
 PERF_LOOKBACK_HOURS = 8              # Era 9: extended from 4 — wider window catches more data
@@ -183,7 +183,7 @@ SERIES_TO_OKX_PERP = {
     'KXBTC15M': 'BTC-USDT-SWAP', 'KXETH15M': 'ETH-USDT-SWAP',
     'KXSOL15M': 'SOL-USDT-SWAP', 'KXXRP15M': 'XRP-USDT-SWAP',
 }
-SIGNAL_CONVERGENCE_WEIGHT = 0.15     # New Signal D: OKX perp vs spot spread
+SIGNAL_CONVERGENCE_WEIGHT = 0.05     # Era 15: reduced from 0.15 — OKX perp had persistent bearish bias (avg 0.483), contaminating signals
 
 # Database configuration
 DB_PATH = 'data/enhanced_15min_trader_fixed.db'

@@ -45,7 +45,7 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 15: OBSERVATION — Signal E killed, Signal D neutered, validating before live
+OBSERVATION_MODE = True        # Era 16: OBSERVATION — Asymmetric Dollar Edge: 44-52c band, payoff ratio gate, validating before live
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -71,10 +71,10 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 # === LAYER 1: Trade Quality Gates ===
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
-MIN_ENTRY_PRICE = 41                 # Era 14: keep 41c floor (below was 32.5% WR in Era 2)
-MAX_ENTRY_PRICE = 55                 # Era 14: restore 48-55c zone (63.6% WR, +$24.43 in Era 2 — best band)
-IDEAL_ENTRY_MIN = 42                 # Logged for analysis only
-IDEAL_ENTRY_MAX = 47                 # Logged for analysis only
+MIN_ENTRY_PRICE = 44                 # Era 16: cut 41-43c (28-33% WR, -$19.38 combined — well below breakeven)
+MAX_ENTRY_PRICE = 53                 # Era 16: cut 53c+ (negative edge, payoff ratio <1.0x)
+IDEAL_ENTRY_MIN = 44                 # Era 16: sweet spot is 44-46c (45c = +$25.60, 2.32x W/L ratio)
+IDEAL_ENTRY_MAX = 46                 # Era 16: tighten from 47 — 47c was -$14.52 all-time
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
 MAX_CONTRACTS_CEILING = 10           # Era 14: headroom for growth (Kelly keeps actual sizing at 2-4 at $53; Era 2 avg was 2.81)
 STRONG_RISK_PCT = 0.035              # Strong conviction: risk up to 3.5% of balance per trade
@@ -84,6 +84,7 @@ VOLATILITY_LOOKBACK_SECONDS = 900    # 15 min lookback for vol calc
 VOLATILITY_MIN_SAMPLES = 10          # Need this many price points for vol
 VOLATILITY_LOW_THRESHOLD = 0.0001    # Era 9: lowered from 0.0003 — vol gate killed 2 strong-conviction would-have-won signals today
 MIN_CONVICTION_IMPROVEMENT = 0.005   # New signal must beat resting order by 0.5pp to replace it
+MIN_PAYOFF_RATIO = 1.0               # Era 16: only trade when payoff (win/risk) >= 1.0x — gates out 50c+ entries
 # YES_DIRECTION_PENALTY = 0.005      # Replaced by adaptive penalty (Era 8)
 
 # === REGIME GATE (Era 11: DISABLED) ===
@@ -1387,8 +1388,8 @@ def calculate_kelly_fraction(win_prob, cost):
 
 def get_entry_band_sizing(entry_price):
     """
-    Era 10: Returns sizing multiplier based on entry price position within the optimal band.
-    Rewards the 42-47c sweet spot (full sizing), penalizes edges of the band.
+    Era 16: Returns sizing multiplier based on entry price position within the optimal band.
+    Rewards the 44-46c sweet spot (full sizing — 45c = 2.32x W/L ratio, +$25.60 all-time).
     Returns 0 for prices outside the tradeable range (should be blocked by Gate 1).
     """
     if entry_price < MIN_ENTRY_PRICE or entry_price >= MAX_ENTRY_PRICE:
@@ -3547,6 +3548,14 @@ def run_enhanced_15min_trader_fixed():
                                 gate_declined = 'too_expensive'
                                 decline_reason = f'Entry too expensive ({entry_price}c >= {MAX_ENTRY_PRICE}c ceiling, payoff={payoff_multiple:.2f}x)'
                                 print(f"    🚫 [GATE 1] {market['ticker']}: {decline_reason}")
+
+                        # GATE 1.5 — Payoff Ratio (Era 16: only trade when win > risk)
+                        if gate_declined is None:
+                            payoff_ratio = (100 - entry_price) / entry_price if entry_price > 0 else 0
+                            if payoff_ratio < MIN_PAYOFF_RATIO:
+                                gate_declined = 'low_payoff'
+                                decline_reason = f'Payoff too low ({payoff_ratio:.2f}x < {MIN_PAYOFF_RATIO}x at {entry_price}c)'
+                                print(f"    🚫 [GATE 1.5] {market['ticker']}: {decline_reason}")
 
                         # GATE 2 — Payoff-Adjusted EV (Era 10: rewards asymmetric entries)
                         if gate_declined is None and adjusted_ev <= MIN_ADJUSTED_EV:

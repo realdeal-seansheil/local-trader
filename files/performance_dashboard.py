@@ -110,6 +110,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 15',
         'label': 'Signal purge: Signal E killed, Signal D 0.15→0.05 (observation)',
         'start': '2026-02-24T01:00:00+00:00',
+        'end': '2026-02-23T23:30:00+00:00',
+    },
+    {
+        'name': 'Era 16',
+        'label': 'Asymmetric Dollar Edge: 44-52c band, payoff ratio gate (observation)',
+        'start': '2026-02-23T23:30:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

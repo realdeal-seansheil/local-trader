@@ -41,7 +41,7 @@ from config import (
     POLL_INTERVAL_SECONDS, EXIT_BEFORE_CLOSE_SECONDS, MAX_DAILY_STRADDLES,
     MAX_DAILY_EXPOSURE_CENTS, OBSERVATION_MODE, SCAN_BEFORE_QUARTER_SECONDS,
     ENTRY_WINDOW_SECONDS, KALSHI_FEE_RATE, DATA_DIR,
-    LOOP_INTERVAL_SECONDS, MAX_SIMULTANEOUS_POSITIONS, SCAN_COOLDOWN_SECONDS,
+    LOOP_INTERVAL_SECONDS, MAX_SIMULTANEOUS_POSITIONS,
     SKIP_HOURS,
 )
 from position_tracker import PositionTracker
@@ -650,15 +650,11 @@ class StraddleExecutor:
 
         new_entries = []
 
+        entered = getattr(self, '_entered_tickers', set())
+
         for series in CRYPTO_SERIES:
             if series in open_series:
                 continue  # Already have a position in this series
-
-            # Check cooldown
-            if hasattr(self, '_series_cooldowns') and series in self._series_cooldowns:
-                elapsed = (datetime.now() - self._series_cooldowns[series]).total_seconds()
-                if elapsed < SCAN_COOLDOWN_SECONDS:
-                    continue
 
             # Fetch open market for this series
             try:
@@ -675,8 +671,8 @@ class StraddleExecutor:
             market = markets[0]
             ticker = market.get("ticker", "")
 
-            # Skip if already tracking this ticker (defensive)
-            if ticker in open_tickers or ticker in self.tracker.positions:
+            # Skip if already entered this exact ticker (same market window)
+            if ticker in open_tickers or ticker in self.tracker.positions or ticker in entered:
                 continue
 
             # Get orderbook and check entry criteria
@@ -704,6 +700,7 @@ class StraddleExecutor:
             pos = self.enter_straddle(market, ob)
             if pos:
                 new_entries.append(pos)
+                self._entered_tickers.add(ticker)
 
         return new_entries
 
@@ -720,7 +717,7 @@ class StraddleExecutor:
         Market rollovers are automatic: expired position gets archived,
         series becomes available, next scan enters the new market.
         """
-        self._series_cooldowns = {}  # series -> datetime of last exit
+        self._entered_tickers = set()  # tickers already entered — prevents same-window re-entry
         loop_count = 0
 
         print(f"\n  Continuous mode started.")
@@ -735,9 +732,9 @@ class StraddleExecutor:
             # Step 1: Check exits on all open positions
             exits = self.check_position_exits()
 
-            # Record cooldowns for exited series
+            # Block re-entry into exited tickers (same market window)
             for pos, _, _, _ in exits:
-                self._series_cooldowns[pos.series] = datetime.now()
+                self._entered_tickers.add(pos.ticker)
 
             # Step 2: Scan for new entries
             new_entries = self.scan_for_entries()

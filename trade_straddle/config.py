@@ -62,7 +62,7 @@ ENTRY_WINDOW_SECONDS = 30         # Must enter within 30s of market open
 # ============================================================
 LOOP_INTERVAL_SECONDS = 3        # Main loop tick interval (scan + monitor)
 MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
-SCAN_COOLDOWN_SECONDS = 900      # After exit, wait before re-entering same series (was 15; re-entries have 0% win rate)
+# Re-entry prevention: ticker-based (not time-based). See _entered_tickers in straddle_executor.py.
 
 # ============================================================
 # TIME RESTRICTIONS

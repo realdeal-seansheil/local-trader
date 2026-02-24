@@ -45,7 +45,8 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 16: OBSERVATION — Asymmetric Dollar Edge: 44-52c band, payoff ratio gate, validating before live
+OBSERVATION_MODE = True        # Era 17: OBSERVATION — Cheap-side direction, fixed sizing, validating
+CHEAP_SIDE_MODE = True         # Era 17: pick cheaper side for direction (original profitable logic)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -1909,24 +1910,38 @@ def execute_trade_enhanced(auth, market, win_prob, ev_per_contract, kelly_frac, 
     # Determine best direction based on EV
     yes_ev = calculate_ev(yes_ask, no_ask, win_prob, 'YES')
     no_ev = calculate_ev(yes_ask, no_ask, 1 - win_prob, 'NO')  # FIXED: Explicit NO probability
-    
-    if yes_ev > no_ev and yes_ev > MIN_EV_THRESHOLD:
-        direction = 'YES'
-        price = yes_ask
-        ev = yes_ev
-    elif no_ev > MIN_EV_THRESHOLD:
-        direction = 'NO'
-        price = no_ask
-        ev = no_ev
+
+    if CHEAP_SIDE_MODE:
+        # Era 17: Direction already determined by cheaper side
+        if yes_ask <= no_ask:
+            direction = 'YES'
+            price = yes_ask
+            ev = yes_ev
+        else:
+            direction = 'NO'
+            price = no_ask
+            ev = no_ev
     else:
-        return False, "EV below threshold"
-    
+        if yes_ev > no_ev and yes_ev > MIN_EV_THRESHOLD:
+            direction = 'YES'
+            price = yes_ask
+            ev = yes_ev
+        elif no_ev > MIN_EV_THRESHOLD:
+            direction = 'NO'
+            price = no_ask
+            ev = no_ev
+        else:
+            return False, "EV below threshold"
+
     # Position sizing with L1 guardrails
     effective_max = market.get('_effective_max', MAX_CONTRACTS_CEILING)
     min_contracts = market.get('_min_contracts', 1)
 
     if OBSERVATION_MODE:
-        contracts = min(10, effective_max)  # Fixed size for paper tracking
+        if CHEAP_SIDE_MODE:
+            contracts = 3  # Era 17: fixed sizing like original bot
+        else:
+            contracts = min(10, effective_max)  # Legacy paper tracking
     else:
         # Era 12: restored Era 2 sizing — min(kelly, budget)
         # Conviction-based Kelly now returns meaningful values for both directions
@@ -3484,12 +3499,21 @@ def run_enhanced_15min_trader_fixed():
                         best_ev = max(yes_ev, no_ev)
 
                         # Determine best direction and kelly (needed for logging even when declined)
-                        if yes_ev >= no_ev:
-                            best_direction = 'YES'
-                            kelly_frac = calculate_kelly_fraction(win_prob, market['yes_ask'])
+                        if CHEAP_SIDE_MODE:
+                            # Era 17: Original profitable logic — pick the cheaper (higher payoff) side
+                            if market['yes_ask'] <= market['no_ask']:
+                                best_direction = 'YES'
+                            else:
+                                best_direction = 'NO'
+                            kelly_frac = 0.01  # Nominal — not used for sizing in cheap-side mode
                         else:
-                            best_direction = 'NO'
-                            kelly_frac = calculate_kelly_fraction(1 - win_prob, market['no_ask'])
+                            # Legacy: EV-based direction from signal pipeline
+                            if yes_ev >= no_ev:
+                                best_direction = 'YES'
+                                kelly_frac = calculate_kelly_fraction(win_prob, market['yes_ask'])
+                            else:
+                                best_direction = 'NO'
+                                kelly_frac = calculate_kelly_fraction(1 - win_prob, market['no_ask'])
 
                         scan_time_iso = current_time.isoformat()
                         hour_utc = get_current_hour_utc()
@@ -3564,7 +3588,8 @@ def run_enhanced_15min_trader_fixed():
                             print(f"    🚫 [GATE 2] {market['ticker']}: {decline_reason}")
 
                         # GATE 3 — Adaptive Conviction (Era 10: scaled by payoff multiple)
-                        if gate_declined is None:
+                        # Era 17: Skip in CHEAP_SIDE_MODE — conviction is signal-dependent, irrelevant for cheaper-side logic
+                        if gate_declined is None and not CHEAP_SIDE_MODE:
                             effective_conviction_threshold = MIN_CONVICTION_THRESHOLD / max(payoff_multiple, 1.0)
                             if combined_conviction < effective_conviction_threshold:
                                 gate_declined = 'low_conviction'
@@ -3573,7 +3598,8 @@ def run_enhanced_15min_trader_fixed():
                                 print(f"    🚫 [GATE 3] {market['ticker']}: {decline_reason}")
 
                         # GATE 4 — Volatility (skip if too flat to predict)
-                        if gate_declined is None and vol > 0 and vol < VOLATILITY_LOW_THRESHOLD and signal_detail.get('volatility', 0) > 0:
+                        # Era 17: Skip in CHEAP_SIDE_MODE — vol gate is about signal quality, not relevant for cheaper-side
+                        if gate_declined is None and not CHEAP_SIDE_MODE and vol > 0 and vol < VOLATILITY_LOW_THRESHOLD and signal_detail.get('volatility', 0) > 0:
                             gate_declined = 'low_volatility'
                             decline_reason = f'Low volatility ({vol:.6f} < {VOLATILITY_LOW_THRESHOLD})'
                             print(f"    🚫 [GATE 4] {market['ticker']}: {decline_reason}")

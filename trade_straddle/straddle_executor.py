@@ -25,6 +25,7 @@ import json
 import time
 import calendar
 import pathlib
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 # Add trade_arbitrage to path for imports
@@ -35,11 +36,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from kalshi_executor import KalshiAuth, KalshiClient, KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH
 from config import (
     CRYPTO_SERIES, MAX_CONTRACTS_PER_SIDE, MAX_COMBINED_ENTRY_CENTS,
+    MAX_SINGLE_SIDE_ENTRY, MIN_IMBALANCE_CENTS,
     MIN_ORDERBOOK_DEPTH, EXIT_PROFIT_TARGET_CENTS, EXIT_TIMEOUT_SECONDS,
     POLL_INTERVAL_SECONDS, EXIT_BEFORE_CLOSE_SECONDS, MAX_DAILY_STRADDLES,
     MAX_DAILY_EXPOSURE_CENTS, OBSERVATION_MODE, SCAN_BEFORE_QUARTER_SECONDS,
     ENTRY_WINDOW_SECONDS, KALSHI_FEE_RATE, DATA_DIR,
     LOOP_INTERVAL_SECONDS, MAX_SIMULTANEOUS_POSITIONS, SCAN_COOLDOWN_SECONDS,
+    SKIP_HOURS,
 )
 from position_tracker import PositionTracker
 
@@ -152,6 +155,10 @@ class StraddleExecutor:
                 # Check entry criteria
                 if ob["combined_ask"] > MAX_COMBINED_ENTRY_CENTS:
                     continue
+                if ob["yes_ask"] >= MAX_SINGLE_SIDE_ENTRY or ob["no_ask"] >= MAX_SINGLE_SIDE_ENTRY:
+                    continue  # Market already decided
+                if abs(ob["yes_ask"] - ob["no_ask"]) < MIN_IMBALANCE_CENTS:
+                    continue  # Balanced entries are net-negative
                 if ob["yes_bid_depth"] < MIN_ORDERBOOK_DEPTH:
                     continue
                 if ob["no_bid_depth"] < MIN_ORDERBOOK_DEPTH:
@@ -617,9 +624,14 @@ class StraddleExecutor:
         Scan all crypto series for entry opportunities.
         Skips any series where we already have a position (open or holding).
         Respects per-series cooldown after exit.
+        Applies quality filters: combined entry, imbalance, skip hours.
 
         Returns list of positions entered this tick.
         """
+        # Skip restricted hours
+        if datetime.now().hour in SKIP_HOURS:
+            return []
+
         # Skip series with ANY active position (open, partial_exit, etc.)
         active_positions = [p for p in self.tracker.positions.values()
                            if p.status in ("open", "partial_exit")]
@@ -679,6 +691,10 @@ class StraddleExecutor:
 
             if ob["combined_ask"] > MAX_COMBINED_ENTRY_CENTS:
                 continue
+            if ob["yes_ask"] >= MAX_SINGLE_SIDE_ENTRY or ob["no_ask"] >= MAX_SINGLE_SIDE_ENTRY:
+                continue  # Market already decided — no straddle opportunity
+            if abs(ob["yes_ask"] - ob["no_ask"]) < MIN_IMBALANCE_CENTS:
+                continue  # Balanced entries are net-negative
             if ob["yes_bid_depth"] < MIN_ORDERBOOK_DEPTH:
                 continue
             if ob["no_bid_depth"] < MIN_ORDERBOOK_DEPTH:
@@ -736,8 +752,509 @@ class StraddleExecutor:
                       f"open: {open_str} | "
                       f"daily: {stats['daily_straddles']} straddles")
 
+                # Check for settlement results and show rolling P&L
+                self.check_settlements()
+                self.print_rolling_pnl()
+                self.print_stats_compact()
+
             # Step 4: Sleep
             time.sleep(LOOP_INTERVAL_SECONDS)
+
+    # ==========================================================
+    # SETTLEMENT TRACKING
+    # ==========================================================
+
+    def _settle_entry(self, entry):
+        """
+        Try to settle a single partial-exit entry via Kalshi API.
+        Returns (ticker, result, actual_pnl) or None if not yet settled.
+        """
+        yes_sold = entry.get("yes_sold", 0)
+        no_sold = entry.get("no_sold", 0)
+        contracts = entry.get("contracts", 5)
+
+        ticker = entry.get("ticker", "")
+        try:
+            market_data = self.client.get_market(ticker)
+            market = market_data.get("market", market_data)
+            result = market.get("result", "")
+            if result not in ("yes", "no"):
+                return None  # Not yet settled
+        except Exception:
+            return None
+
+        entry["settlement_result"] = result
+
+        # Determine which side was held and compute payout
+        held_yes = contracts - yes_sold
+        held_no = contracts - no_sold
+
+        if held_yes > 0 and held_no == 0:
+            held_payout = held_yes * 100 if result == "yes" else 0
+        elif held_no > 0 and held_yes == 0:
+            held_payout = held_no * 100 if result == "no" else 0
+        else:
+            held_payout = 0
+
+        # Compute sell proceeds from the sold side
+        sell_proceeds = 0
+        yes_exit = entry.get("yes_exit_price")
+        no_exit = entry.get("no_exit_price")
+        if yes_exit and yes_sold > 0:
+            sell_proceeds += yes_exit * yes_sold
+        if no_exit and no_sold > 0:
+            sell_proceeds += no_exit * no_sold
+
+        yes_entry = entry.get("yes_entry_price", 0)
+        no_entry = entry.get("no_entry_price", 0)
+        cost = (yes_entry + no_entry) * contracts
+
+        actual_pnl = sell_proceeds + held_payout - cost
+        entry["pnl_actual"] = actual_pnl
+
+        # Backfill pnl_best_case for legacy entries
+        if entry.get("pnl_best_case") is None:
+            worst = sell_proceeds - cost
+            best = worst + (held_yes + held_no) * 100
+            entry["pnl_cents"] = worst
+            entry["pnl_best_case"] = best
+
+        held_side = "YES" if held_yes > 0 else "NO"
+        won = "WON" if held_payout > 0 else "lost"
+        print(f"  Settlement: {ticker} → {result.upper()} | "
+              f"held {held_side} {won} | P&L: {actual_pnl:+d}c")
+
+        return (ticker, result, actual_pnl)
+
+    def check_settlements(self):
+        """
+        Check Kalshi API for settlement results on completed straddles.
+        Checks both history file and active state-file positions.
+
+        Returns list of (ticker, result, actual_pnl) for newly resolved.
+        """
+        resolved = []
+
+        # === Part 1: History file entries ===
+        history_path = os.path.join(DATA_DIR, "straddle_history.jsonl")
+        entries = []
+        if os.path.exists(history_path):
+            with open(history_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+
+        history_updated = False
+
+        for entry in entries:
+            if entry.get("settlement_result"):
+                continue
+
+            yes_sold = entry.get("yes_sold", 0)
+            no_sold = entry.get("no_sold", 0)
+            is_partial = (yes_sold > 0) != (no_sold > 0)
+            if not is_partial:
+                continue
+
+            result = self._settle_entry(entry)
+            if result:
+                resolved.append(result)
+                history_updated = True
+
+        if history_updated:
+            with open(history_path, "w") as f:
+                for entry in entries:
+                    f.write(json.dumps(entry, default=str) + "\n")
+
+        # === Part 2: State-file positions (partial_exit not yet archived) ===
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "partial_exit":
+                continue
+            if pos.settlement_result:
+                continue
+
+            # Check if one side was sold
+            is_partial = (pos.yes_sold > 0) != (pos.no_sold > 0)
+            if not is_partial:
+                continue
+
+            entry = pos.to_dict()
+            result = self._settle_entry(entry)
+            if result:
+                # Update the position object from the settled entry dict
+                pos.settlement_result = entry.get("settlement_result")
+                pos.pnl_cents = entry.get("pnl_cents")
+                pos.pnl_best_case = entry.get("pnl_best_case")
+                pos.pnl_actual = entry.get("pnl_actual")
+                pos.status = "expired"
+
+                # Archive it to history
+                self.tracker._archive_position(pos)
+                self.tracker.save_state()
+                resolved.append(result)
+
+        return resolved
+
+    def _load_all_straddles(self):
+        """Load all straddles from history + completed positions still in state."""
+        entries = []
+
+        # 1. History file (archived positions)
+        history_path = os.path.join(DATA_DIR, "straddle_history.jsonl")
+        if os.path.exists(history_path):
+            with open(history_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+
+        # 2. Completed positions still in state (closed/expired not yet archived)
+        history_tickers = {e.get("ticker") for e in entries}
+        for pos in self.tracker.positions.values():
+            if pos.status in ("closed", "expired", "partial_exit"):
+                d = pos.to_dict()
+                # Avoid double-counting: skip if already in history
+                # Use ticker + entry_time as dedup key (same ticker can have re-entries)
+                key = (d.get("ticker"), d.get("entry_time"))
+                already = any(
+                    (e.get("ticker"), e.get("entry_time")) == key
+                    for e in entries
+                )
+                if not already:
+                    entries.append(d)
+
+        return entries
+
+    _MONTH_MAP = {
+        'JAN': '01', 'FEB': '02', 'MAR': '03', 'APR': '04',
+        'MAY': '05', 'JUN': '06', 'JUL': '07', 'AUG': '08',
+        'SEP': '09', 'OCT': '10', 'NOV': '11', 'DEC': '12',
+    }
+
+    def _parse_ticker_date(self, ticker_date_str):
+        """Parse YYMMMDD ticker date (e.g. '26FEB23') → ISO '2026-02-23'."""
+        if len(ticker_date_str) >= 7:
+            yy = ticker_date_str[:2]
+            mmm = ticker_date_str[2:5]
+            dd = ticker_date_str[5:7]
+            mm = self._MONTH_MAP.get(mmm.upper())
+            if mm:
+                return f"20{yy}-{mm}-{dd}"
+        return None
+
+    def _group_by_window(self, entries):
+        """Group straddle entries by market window (date-aware).
+        Key format: '2026-02-23:1315' — ISO date from ticker + time from ticker.
+        Uses the ticker's embedded date (YYMMMDD) so midnight markets sort correctly."""
+        windows = {}
+        for e in entries:
+            ticker = e.get("ticker", "")
+            parts = ticker.split("-")
+            time_part = parts[1][-4:] if len(parts) >= 2 and len(parts[1]) >= 4 else "?"
+            # Use ticker date (YYMMMDD) — correct market date even for midnight entries
+            ticker_date = parts[1][:-4] if len(parts) >= 2 and len(parts[1]) > 4 else ""
+            date_part = self._parse_ticker_date(ticker_date) if ticker_date else None
+            # Fallback to entry_time if ticker date can't be parsed
+            if not date_part:
+                date_part = e.get("entry_time", "")[:10]
+            window = f"{date_part}:{time_part}" if date_part else time_part
+            if window not in windows:
+                windows[window] = []
+            windows[window].append(e)
+        return windows
+
+    def print_rolling_pnl(self):
+        """Print a compact rolling P&L summary by window with return %."""
+        entries = self._load_all_straddles()
+        if not entries:
+            return
+
+        windows = self._group_by_window(entries)
+
+        rolling = 0
+        rolling_cost = 0
+        unsettled_worst = 0
+        unsettled_best = 0
+        lines = []
+
+        for window in sorted(windows.keys()):
+            straddles = windows[window]
+            w_pnl = 0
+            w_cost = 0
+            w_unsettled = 0
+            w_worst = 0
+            w_best = 0
+            all_settled = True
+
+            for s in straddles:
+                # Entry cost for this straddle
+                contracts = s.get("contracts", 5)
+                combined = (s.get("yes_entry_price", 0) + s.get("no_entry_price", 0))
+                cost = combined * contracts
+                w_cost += cost
+
+                actual = s.get("pnl_actual")
+                if actual is not None:
+                    w_pnl += actual
+                elif s.get("status") == "closed":
+                    w_pnl += s.get("pnl_cents", 0) or 0
+                elif s.get("status") == "expired" and s.get("yes_sold", 0) == 0 and s.get("no_sold", 0) == 0:
+                    # Fully hedged — deterministic
+                    w_pnl += s.get("pnl_cents", 0) or 0
+                else:
+                    # Unsettled partial exit
+                    all_settled = False
+                    w_unsettled += 1
+                    pnl = s.get("pnl_cents", 0) or 0
+                    best = s.get("pnl_best_case")
+                    if best is None:
+                        # Legacy — compute on the fly
+                        yes_sold = s.get("yes_sold", 0)
+                        no_sold = s.get("no_sold", 0)
+                        yes_exit = s.get("yes_exit_price")
+                        no_exit = s.get("no_exit_price")
+                        sell_proc = 0
+                        if yes_exit and yes_sold > 0:
+                            sell_proc += yes_exit * yes_sold
+                        if no_exit and no_sold > 0:
+                            sell_proc += no_exit * no_sold
+                        pnl = sell_proc - cost
+                        best = pnl + (contracts - yes_sold + contracts - no_sold) * 100
+                    w_worst += pnl
+                    w_best += best
+
+            rolling += w_pnl
+            rolling_cost += w_cost
+            unsettled_worst += w_worst
+            unsettled_best += w_best
+
+            ret_pct = (w_pnl / w_cost * 100) if w_cost > 0 else 0
+
+            # Parse date:time from window key (e.g. "2026-02-23:1315")
+            if ":" in window:
+                w_date, w_time = window.split(":", 1)
+            else:
+                w_date, w_time = "", window
+
+            if all_settled:
+                lines.append((w_date,
+                    f"  :{w_time}  {w_pnl:+6d}c / {w_cost}c ({ret_pct:+.1f}%)  "
+                    f"rolling: {rolling:+d}c"
+                ))
+            else:
+                range_lo = w_pnl + w_worst
+                range_hi = w_pnl + w_best
+                ret_lo = (range_lo / w_cost * 100) if w_cost > 0 else 0
+                ret_hi = (range_hi / w_cost * 100) if w_cost > 0 else 0
+                lines.append((w_date,
+                    f"  :{w_time}  {range_lo:+d}c to {range_hi:+d}c / {w_cost}c "
+                    f"({ret_lo:+.1f}% to {ret_hi:+.1f}%)  "
+                    f"({w_unsettled} unsettled)"
+                ))
+
+        total_lo = rolling + unsettled_worst
+        total_hi = rolling + unsettled_best
+
+        print(f"\n  ── Rolling P&L ──")
+        prev_date = None
+        for w_date, line in lines:
+            if w_date and w_date != prev_date:
+                print(f"  ── {w_date} ──")
+                prev_date = w_date
+            print(line)
+        if unsettled_worst == 0 and unsettled_best == 0:
+            ret = (rolling / rolling_cost * 100) if rolling_cost > 0 else 0
+            print(f"  {'─'*50}")
+            print(f"  TOTAL: {rolling:+d}c / {rolling_cost}c = {ret:+.1f}% "
+                  f"(${rolling/100:.2f})")
+        else:
+            ret_lo = (total_lo / rolling_cost * 100) if rolling_cost > 0 else 0
+            ret_hi = (total_hi / rolling_cost * 100) if rolling_cost > 0 else 0
+            print(f"  {'─'*50}")
+            print(f"  Settled: {rolling:+d}c | Unsettled: {unsettled_worst:+d}c to {unsettled_best:+d}c")
+            print(f"  TOTAL:  {total_lo:+d}c to {total_hi:+d}c / {rolling_cost}c "
+                  f"({ret_lo:+.1f}% to {ret_hi:+.1f}%)")
+        print()
+
+    def _get_settled_entries(self):
+        """Load all straddles and return only those with deterministic P&L.
+        Returns list of (entry_dict, pnl_cents) tuples."""
+        entries = self._load_all_straddles()
+        settled = []
+        for e in entries:
+            pnl = e.get("pnl_actual")
+            if pnl is None:
+                if e.get("status") == "closed":
+                    pnl = e.get("pnl_cents", 0) or 0
+                elif (e.get("status") == "expired"
+                      and e.get("yes_sold", 0) == 0
+                      and e.get("no_sold", 0) == 0):
+                    pnl = e.get("pnl_cents", 0) or 0
+                else:
+                    continue  # unsettled partial exit
+            settled.append((e, pnl))
+        return settled
+
+    def print_stats(self):
+        """Print analytics dashboard: per-series performance, exit triggers,
+        settlement patterns, and entry price analysis."""
+        settled = self._get_settled_entries()
+        if not settled:
+            print("  No settled straddle data to analyze.")
+            return
+
+        # ── Section A: Per-Series Performance ──
+        series_stats = defaultdict(lambda: {"count": 0, "wins": 0, "pnl_list": []})
+        for e, pnl in settled:
+            s = e.get("series", "?")
+            series_stats[s]["count"] += 1
+            series_stats[s]["pnl_list"].append(pnl)
+            if pnl > 0:
+                series_stats[s]["wins"] += 1
+
+        print(f"\n  {'='*55}")
+        print(f"  ANALYTICS DASHBOARD  ({len(settled)} settled entries)")
+        print(f"  {'='*55}")
+
+        print(f"\n  ── Series Performance ──")
+        print(f"  {'Series':<12} {'#':>3} {'Win%':>6} {'Avg PnL':>9} {'Total':>8}")
+        for series in sorted(series_stats.keys()):
+            st = series_stats[series]
+            n = st["count"]
+            wins = st["wins"]
+            total = sum(st["pnl_list"])
+            avg = total / n if n > 0 else 0
+            wr = (wins / n * 100) if n > 0 else 0
+            print(f"  {series:<12} {n:>3} {wr:>5.0f}% {avg:>+8.1f}c {total:>+7d}c")
+
+        # ── Section B: Exit Triggers ──
+        sold_yes_count = 0
+        sold_yes_wins = 0
+        sold_no_count = 0
+        sold_no_wins = 0
+        both_neither = 0
+        exit_times = []
+
+        for e, pnl in settled:
+            yes_sold = e.get("yes_sold", 0)
+            no_sold = e.get("no_sold", 0)
+
+            entry_t = e.get("entry_time")
+            exit_t = e.get("exit_time")
+            if entry_t and exit_t:
+                try:
+                    dt_entry = datetime.fromisoformat(entry_t)
+                    dt_exit = datetime.fromisoformat(exit_t)
+                    exit_times.append((dt_exit - dt_entry).total_seconds())
+                except Exception:
+                    pass
+
+            if yes_sold > 0 and no_sold == 0:
+                sold_yes_count += 1
+                if pnl > 0:
+                    sold_yes_wins += 1
+            elif no_sold > 0 and yes_sold == 0:
+                sold_no_count += 1
+                if pnl > 0:
+                    sold_no_wins += 1
+            else:
+                both_neither += 1
+
+        print(f"\n  ── Exit Triggers ──")
+        yes_wr = (sold_yes_wins / sold_yes_count * 100) if sold_yes_count > 0 else 0
+        no_wr = (sold_no_wins / sold_no_count * 100) if sold_no_count > 0 else 0
+        print(f"  Sold YES (held NO): {sold_yes_count}  "
+              f"({yes_wr:.0f}% held-side win)")
+        print(f"  Sold NO  (held YES): {sold_no_count}  "
+              f"({no_wr:.0f}% held-side win)")
+        if both_neither:
+            print(f"  Both/None: {both_neither}")
+        if exit_times:
+            avg_exit = sum(exit_times) / len(exit_times) / 60
+            min_exit = min(exit_times) / 60
+            max_exit = max(exit_times) / 60
+            print(f"  Time to exit: avg {avg_exit:.1f} min  "
+                  f"(range {min_exit:.1f}–{max_exit:.1f} min)")
+
+        # ── Section C: Settlement Patterns ──
+        yes_settled = []
+        no_settled = []
+        for e, pnl in settled:
+            sr = e.get("settlement_result")
+            if sr == "yes":
+                yes_settled.append(pnl)
+            elif sr == "no":
+                no_settled.append(pnl)
+
+        total_sr = len(yes_settled) + len(no_settled)
+        if total_sr > 0:
+            print(f"\n  ── Settlement Patterns ──")
+            print(f"  YES settled: {len(yes_settled)}/{total_sr} "
+                  f"({len(yes_settled)/total_sr*100:.0f}%)")
+            print(f"  NO  settled: {len(no_settled)}/{total_sr} "
+                  f"({len(no_settled)/total_sr*100:.0f}%)")
+            if yes_settled:
+                print(f"  Avg PnL when YES: {sum(yes_settled)/len(yes_settled):+.1f}c")
+            if no_settled:
+                print(f"  Avg PnL when NO:  {sum(no_settled)/len(no_settled):+.1f}c")
+
+        # ── Section D: Entry Prices ──
+        combined_all = []
+        combined_win = []
+        combined_loss = []
+        imbalances = []
+
+        for e, pnl in settled:
+            yp = e.get("yes_entry_price", 0)
+            np = e.get("no_entry_price", 0)
+            combined = yp + np
+            combined_all.append(combined)
+            imbalances.append(abs(yp - np))
+            if pnl > 0:
+                combined_win.append(combined)
+            elif pnl < 0:
+                combined_loss.append(combined)
+
+        print(f"\n  ── Entry Prices ──")
+        if combined_all:
+            print(f"  Avg combined entry: {sum(combined_all)/len(combined_all):.1f}c")
+        if combined_win:
+            print(f"  Win avg combined:   {sum(combined_win)/len(combined_win):.1f}c")
+        if combined_loss:
+            print(f"  Loss avg combined:  {sum(combined_loss)/len(combined_loss):.1f}c")
+        if imbalances:
+            print(f"  Avg |Y-N| imbalance: {sum(imbalances)/len(imbalances):.1f}c")
+
+        print()
+
+    def print_stats_compact(self):
+        """One-line best/worst series for loop status output."""
+        settled = self._get_settled_entries()
+        if not settled:
+            return
+
+        series_pnl = defaultdict(list)
+        for e, pnl in settled:
+            s = e.get("series", "?").replace("KX", "").replace("15M", "")
+            series_pnl[s].append(pnl)
+
+        if not series_pnl:
+            return
+
+        avgs = {s: sum(v) / len(v) for s, v in series_pnl.items()}
+        best = max(avgs, key=avgs.get)
+        worst = min(avgs, key=avgs.get)
+        total = sum(pnl for _, pnl in settled)
+        print(f"  [stats] best: {best} ({avgs[best]:+.0f}c avg) | "
+              f"worst: {worst} ({avgs[worst]:+.0f}c avg) | "
+              f"net: {total:+d}c")
 
     # ==========================================================
     # SINGLE CYCLE (for cmd_straddle — unchanged)

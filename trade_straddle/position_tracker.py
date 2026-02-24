@@ -15,6 +15,15 @@ from datetime import datetime, date
 from config import DATA_DIR
 
 
+def _held_side(h):
+    """Determine which side was held to expiry from a history dict."""
+    if h.get("yes_sold", 0) == 0 and h.get("no_sold", 0) > 0:
+        return "yes"  # sold NO, held YES
+    elif h.get("no_sold", 0) == 0 and h.get("yes_sold", 0) > 0:
+        return "no"   # sold YES, held NO
+    return None
+
+
 STATE_FILE = os.path.join(DATA_DIR, "straddle_state.json")
 EVENT_LOG = os.path.join(DATA_DIR, "straddle_events.jsonl")
 HISTORY_LOG = os.path.join(DATA_DIR, "straddle_history.jsonl")
@@ -46,6 +55,9 @@ class StraddlePosition:
 
         # P&L
         self.pnl_cents = None
+        self.pnl_best_case = None    # best case for partial exits (held side wins)
+        self.pnl_actual = None       # actual P&L after settlement
+        self.settlement_result = None  # "yes" or "no" — actual market outcome
 
     @property
     def combined_entry_cents(self):
@@ -56,7 +68,7 @@ class StraddlePosition:
         return self.combined_entry_cents * self.contracts
 
     def to_dict(self):
-        return {
+        d = {
             "ticker": self.ticker,
             "series": self.series,
             "entry_time": self.entry_time,
@@ -73,6 +85,13 @@ class StraddlePosition:
             "observation": self.observation,
             "pnl_cents": self.pnl_cents,
         }
+        if self.pnl_best_case is not None:
+            d["pnl_best_case"] = self.pnl_best_case
+        if self.pnl_actual is not None:
+            d["pnl_actual"] = self.pnl_actual
+        if self.settlement_result is not None:
+            d["settlement_result"] = self.settlement_result
+        return d
 
     @classmethod
     def from_dict(cls, d):
@@ -93,6 +112,9 @@ class StraddlePosition:
         pos.exit_time = d.get("exit_time")
         pos.observation = d.get("observation", False)
         pos.pnl_cents = d.get("pnl_cents")
+        pos.pnl_best_case = d.get("pnl_best_case")
+        pos.pnl_actual = d.get("pnl_actual")
+        pos.settlement_result = d.get("settlement_result")
         return pos
 
 
@@ -210,7 +232,14 @@ class PositionTracker:
         return pos
 
     def close_at_expiry(self, ticker):
-        """Mark a straddle as expired (held to settlement)."""
+        """Mark a straddle as expired (held to settlement).
+
+        For partial exits (one side sold, one held), we can't know the final
+        P&L until settlement. We record:
+          pnl_cents     = worst case (held side = $0)
+          pnl_best_case = best case (held side wins = $1 each)
+        The actual P&L depends on settlement_result, resolved later.
+        """
         if ticker not in self.positions:
             return
 
@@ -223,28 +252,41 @@ class PositionTracker:
             pos.contracts - pos.yes_sold,
             pos.contracts - pos.no_sold,
         )
-        # P&L from expiry: hedged * 100c - remaining cost
         remaining_yes = pos.contracts - pos.yes_sold
         remaining_no = pos.contracts - pos.no_sold
-        remaining_cost = (remaining_yes * pos.yes_entry_price +
-                          remaining_no * pos.no_entry_price)
         expiry_payout = hedged * 100  # $1 per hedged pair
 
-        # Add any sell proceeds already captured
+        # Sell proceeds from sides already sold
         sell_proceeds = 0
         if pos.yes_exit_price and pos.yes_sold > 0:
             sell_proceeds += pos.yes_exit_price * pos.yes_sold
         if pos.no_exit_price and pos.no_sold > 0:
             sell_proceeds += pos.no_exit_price * pos.no_sold
 
-        pos.pnl_cents = sell_proceeds + expiry_payout - pos.total_cost_cents
+        if hedged == 0 and (pos.yes_sold > 0 or pos.no_sold > 0):
+            # Partial exit — one side sold, one held directionally
+            # Worst case: held side = $0
+            worst_pnl = sell_proceeds - pos.total_cost_cents
+            # Best case: held side wins at $1 each
+            held_count = remaining_yes + remaining_no
+            best_pnl = worst_pnl + (held_count * 100)
+            pos.pnl_cents = worst_pnl
+            pos.pnl_best_case = best_pnl
+        else:
+            # Fully hedged (both sides held) or no sides sold
+            pos.pnl_cents = sell_proceeds + expiry_payout - pos.total_cost_cents
+            pos.pnl_best_case = None  # deterministic, no range
 
         self.log_event({
             "type": "straddle_expiry",
             "ticker": ticker,
             "hedged_contracts": hedged,
+            "remaining_yes": remaining_yes,
+            "remaining_no": remaining_no,
+            "sell_proceeds": sell_proceeds,
             "expiry_payout_cents": expiry_payout,
-            "total_pnl_cents": pos.pnl_cents,
+            "pnl_worst": pos.pnl_cents,
+            "pnl_best": pos.pnl_best_case,
             "observation": pos.observation,
         })
 
@@ -357,7 +399,22 @@ class PositionTracker:
             print(f"\n  Recent Completed:")
             for h in history[-5:]:
                 pnl = h.get("pnl_cents", 0) or 0
-                sign = "+" if pnl >= 0 else ""
+                best = h.get("pnl_best_case")
                 obs = " [OBS]" if h.get("observation") else ""
-                print(f"    {h['ticker']}: {sign}{pnl}c "
-                      f"({h.get('status', '?')}){obs}")
+                settlement = h.get("settlement_result", "")
+                if best is not None and settlement:
+                    # We know the actual outcome
+                    actual = best if settlement == _held_side(h) else pnl
+                    sign = "+" if actual >= 0 else ""
+                    print(f"    {h['ticker']}: {sign}{actual}c "
+                          f"(settled {settlement}){obs}")
+                elif best is not None:
+                    # Range — settlement unknown
+                    sign_w = "+" if pnl >= 0 else ""
+                    sign_b = "+" if best >= 0 else ""
+                    print(f"    {h['ticker']}: {sign_w}{pnl}c to "
+                          f"{sign_b}{best}c (awaiting settlement){obs}")
+                else:
+                    sign = "+" if pnl >= 0 else ""
+                    print(f"    {h['ticker']}: {sign}{pnl}c "
+                          f"({h.get('status', '?')}){obs}")

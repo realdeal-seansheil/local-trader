@@ -31,8 +31,10 @@ CRYPTO_SERIES = [
 # ENTRY PARAMETERS
 # ============================================================
 MAX_CONTRACTS_PER_SIDE = 5       # Buy 5 YES + 5 NO per straddle
-MAX_COMBINED_ENTRY_CENTS = 110   # Won't enter if YES_ask + NO_ask > 110c
+MAX_COMBINED_ENTRY_CENTS = 102   # Won't enter if YES_ask + NO_ask > 102c (was 110; entries >102c are net-negative)
+MAX_SINGLE_SIDE_ENTRY = 90       # Skip if either side ask >= 90c (market already decided)
 MIN_ORDERBOOK_DEPTH = 5          # Need >= 5 contracts at the ask level
+MIN_IMBALANCE_CENTS = 10         # Skip balanced entries: |YES_ask - NO_ask| must be >= 10c
 
 # ============================================================
 # EXIT PARAMETERS
@@ -60,7 +62,12 @@ ENTRY_WINDOW_SECONDS = 30         # Must enter within 30s of market open
 # ============================================================
 LOOP_INTERVAL_SECONDS = 3        # Main loop tick interval (scan + monitor)
 MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
-SCAN_COOLDOWN_SECONDS = 15       # After exit, wait before re-entering same series
+SCAN_COOLDOWN_SECONDS = 900      # After exit, wait before re-entering same series (was 15; re-entries have 0% win rate)
+
+# ============================================================
+# TIME RESTRICTIONS
+# ============================================================
+SKIP_HOURS = {8, 9, 10}          # Skip these hours (UTC/local). Morning 06-12 is 35% win, -$30.65 total.
 
 # ============================================================
 # KALSHI FEE

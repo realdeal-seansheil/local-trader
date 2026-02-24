@@ -967,6 +967,46 @@ class StraddleExecutor:
             windows[window].append(e)
         return windows
 
+    def _compute_capital_metrics(self, entries):
+        """Compute peak concurrent capital and capital turns.
+
+        Builds a timeline of capital in/out events from entry_time and
+        exit_time of each straddle to find the maximum capital deployed
+        at any single instant.
+
+        Returns (peak_capital, total_wagered, capital_turns).
+        """
+        from datetime import datetime as _dt
+        events = []  # (timestamp_str, delta_cents)
+        total_wagered = 0
+        for s in entries:
+            contracts = s.get("contracts", 5)
+            combined = s.get("yes_entry_price", 0) + s.get("no_entry_price", 0)
+            cost = combined * contracts
+            total_wagered += cost
+
+            entry_t = s.get("entry_time", "")
+            exit_t = s.get("exit_time", "")
+            if entry_t:
+                events.append((entry_t, cost))
+            if exit_t:
+                events.append((exit_t, -cost))
+
+        if not events:
+            return (0, 0, 0)
+
+        events.sort(key=lambda x: x[0])
+
+        current = 0
+        peak = 0
+        for _, delta in events:
+            current += delta
+            if current > peak:
+                peak = current
+
+        turns = (total_wagered / peak) if peak > 0 else 0
+        return (peak, total_wagered, turns)
+
     def print_rolling_pnl(self):
         """Print a compact rolling P&L summary by window with return %."""
         entries = self._load_all_straddles()
@@ -1059,6 +1099,9 @@ class StraddleExecutor:
         total_lo = rolling + unsettled_worst
         total_hi = rolling + unsettled_best
 
+        # Compute peak concurrent capital for accurate return %
+        peak_capital, total_wagered, capital_turns = self._compute_capital_metrics(entries)
+
         print(f"\n  ── Rolling P&L ──")
         prev_date = None
         for w_date, line in lines:
@@ -1067,17 +1110,19 @@ class StraddleExecutor:
                 prev_date = w_date
             print(line)
         if unsettled_worst == 0 and unsettled_best == 0:
-            ret = (rolling / rolling_cost * 100) if rolling_cost > 0 else 0
+            ret = (rolling / peak_capital * 100) if peak_capital > 0 else 0
             print(f"  {'─'*50}")
-            print(f"  TOTAL: {rolling:+d}c / {rolling_cost}c = {ret:+.1f}% "
+            print(f"  TOTAL: {rolling:+d}c / {peak_capital}c peak = {ret:+.1f}% "
                   f"(${rolling/100:.2f})")
+            print(f"         {capital_turns:.0f} turns | {total_wagered}c total wagered")
         else:
-            ret_lo = (total_lo / rolling_cost * 100) if rolling_cost > 0 else 0
-            ret_hi = (total_hi / rolling_cost * 100) if rolling_cost > 0 else 0
+            ret_lo = (total_lo / peak_capital * 100) if peak_capital > 0 else 0
+            ret_hi = (total_hi / peak_capital * 100) if peak_capital > 0 else 0
             print(f"  {'─'*50}")
             print(f"  Settled: {rolling:+d}c | Unsettled: {unsettled_worst:+d}c to {unsettled_best:+d}c")
-            print(f"  TOTAL:  {total_lo:+d}c to {total_hi:+d}c / {rolling_cost}c "
+            print(f"  TOTAL:  {total_lo:+d}c to {total_hi:+d}c / {peak_capital}c peak "
                   f"({ret_lo:+.1f}% to {ret_hi:+.1f}%)")
+            print(f"          {capital_turns:.0f} turns | {total_wagered}c total wagered")
         print()
 
     def _get_settled_entries(self):

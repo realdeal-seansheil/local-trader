@@ -345,22 +345,22 @@ class StraddleExecutor:
 
             # === EXIT TRIGGERS ===
 
-            # Trigger A: YES side hit target
+            # Trigger A: YES side hit target — HOLD (never-sell-YES)
             if yes_pnl >= EXIT_PROFIT_TARGET_CENTS:
-                print(f"\n    EXIT TRIGGER: YES +{yes_pnl}c >= target +{EXIT_PROFIT_TARGET_CENTS}c")
-                return ("yes", current_yes_bid, f"profit_target_yes_{yes_pnl}c")
+                print(f"\n    YES +{yes_pnl}c — holding (never-sell-YES)")
+                # Don't return — fall through to check NO trigger
 
             # Trigger B: NO side hit target
             if no_pnl >= EXIT_PROFIT_TARGET_CENTS:
                 print(f"\n    EXIT TRIGGER: NO +{no_pnl}c >= target +{EXIT_PROFIT_TARGET_CENTS}c")
                 return ("no", current_no_bid, f"profit_target_no_{no_pnl}c")
 
-            # Trigger C: Timeout
+            # Trigger C: Timeout — sell NO only, hold YES to settlement
             if elapsed >= EXIT_TIMEOUT_SECONDS:
-                print(f"\n    EXIT TRIGGER: Timeout ({EXIT_TIMEOUT_SECONDS}s)")
-                return ("both", None, "timeout")
+                print(f"\n    TIMEOUT: selling NO, holding YES to expiry")
+                return ("no", current_no_bid, "timeout_hold_yes")
 
-            # Trigger D: Market close approaching
+            # Trigger D: Market close approaching — sell NO, hold YES to settlement
             if pos.market_close_time:
                 try:
                     # Parse ISO close time
@@ -373,8 +373,8 @@ class StraddleExecutor:
                     now_utc_ts = calendar.timegm(datetime.utcnow().timetuple())
                     secs_to_close = close_utc_ts - now_utc_ts
                     if secs_to_close < EXIT_BEFORE_CLOSE_SECONDS:
-                        print(f"\n    EXIT TRIGGER: Market closing in {secs_to_close:.0f}s")
-                        return ("both", None, f"market_close_{secs_to_close:.0f}s")
+                        print(f"\n    CLOSE: selling NO, holding YES to settlement")
+                        return ("no", current_no_bid, f"market_close_{secs_to_close:.0f}s")
                 except Exception:
                     pass  # If we can't parse close time, rely on timeout
 
@@ -398,7 +398,7 @@ class StraddleExecutor:
         print(f"\n  EXITING: {ticker} — {exit_reason}")
 
         if exit_side == "both":
-            # Timeout or market close — exit both sides at current prices
+            # Never-sell-YES: even on "both" trigger, only sell NO
             try:
                 ob_raw = self.client.get_orderbook(ticker)
                 ob = parse_orderbook(ob_raw)
@@ -408,10 +408,10 @@ class StraddleExecutor:
                 return
 
             if ob:
-                self._execute_sell(pos, "yes", ob["yes_bid"], contracts)
                 self._execute_sell(pos, "no", ob["no_bid"], contracts)
+                print(f"    Holding {contracts}x YES to settlement (never-sell-YES)")
             else:
-                print(f"    Empty orderbook — holding to expiry")
+                print(f"    Empty orderbook — holding both to settlement")
                 self.tracker.close_at_expiry(ticker)
                 return
         else:
@@ -575,11 +575,11 @@ class StraddleExecutor:
 
             # === EXIT TRIGGERS (only for "open" positions) ===
 
-            # Trigger A: YES profit target
+            # Trigger A: YES profit target — HOLD (never-sell-YES)
+            # YES settling 56% means selling YES is selling the likely winner.
             if yes_pnl >= EXIT_PROFIT_TARGET_CENTS:
-                print(f"    [{ticker}] EXIT: YES +{yes_pnl}c hit target")
-                exits.append((pos, "yes", current_yes_bid, f"profit_target_yes_{yes_pnl}c"))
-                continue
+                print(f"    [{ticker}] YES +{yes_pnl}c — holding (never-sell-YES)")
+                # Don't exit — fall through to check NO trigger
 
             # Trigger B: NO profit target
             if no_pnl >= EXIT_PROFIT_TARGET_CENTS:
@@ -587,17 +587,17 @@ class StraddleExecutor:
                 exits.append((pos, "no", current_no_bid, f"profit_target_no_{no_pnl}c"))
                 continue
 
-            # Trigger C: Market close approaching
+            # Trigger C: Market close approaching — sell NO, hold YES to settlement
             secs_to_close = self._seconds_to_close(pos)
             if secs_to_close < EXIT_BEFORE_CLOSE_SECONDS:
-                print(f"    [{ticker}] EXIT: market closing in {secs_to_close:.0f}s")
-                exits.append((pos, "both", None, f"market_close_{secs_to_close:.0f}s"))
+                print(f"    [{ticker}] CLOSE: selling NO, holding YES to settlement")
+                exits.append((pos, "no", current_no_bid, f"market_close_{secs_to_close:.0f}s"))
                 continue
 
-            # Trigger D: Timeout — sell both sides
+            # Trigger D: Timeout — sell NO only, hold YES to settlement
             if elapsed >= EXIT_TIMEOUT_SECONDS:
-                print(f"    [{ticker}] EXIT: timeout ({elapsed:.0f}s)")
-                exits.append((pos, "both", None, "timeout"))
+                print(f"    [{ticker}] TIMEOUT: selling NO, holding YES to expiry")
+                exits.append((pos, "no", current_no_bid, "timeout_hold_yes"))
                 continue
 
         # Execute all triggered exits

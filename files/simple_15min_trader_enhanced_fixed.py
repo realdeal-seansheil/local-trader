@@ -45,9 +45,10 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 18: OBSERVATION — Smart Dumb Money: signal veto + 44-49c band
-CHEAP_SIDE_MODE = True         # Era 17: pick cheaper side for direction (original profitable logic)
-SIGNAL_VETO_ENABLED = True     # Era 18: block trades where signal disagrees with cheap-side (29.4% WR when they disagree)
+OBSERVATION_MODE = True        # Era 19: OBSERVATION — YES Only: structural YES bias edge
+YES_ONLY_MODE = True           # Era 19: always buy YES — YES settles 53%+ (49.9% WR vs NO 36.6% on 880 Era 18 trades)
+CHEAP_SIDE_MODE = True         # Era 17: pick cheaper side for direction (fallback if YES_ONLY_MODE=False)
+SIGNAL_VETO_ENABLED = False    # Era 19: disabled — not needed in YES-only mode (no NO picks to veto)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -74,7 +75,7 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
 MIN_ENTRY_PRICE = 44                 # Era 16: cut 41-43c (28-33% WR, -$19.38 combined — well below breakeven)
-MAX_ENTRY_PRICE = 50                 # Era 18: block 50c (41.8% WR, -$22.50 on 91 trades). Gate 1 uses >= so 50c blocked, 49c passes.
+MAX_ENTRY_PRICE = 55                 # Era 19: expanded — YES at 50-55c was blocked but had 54-58% would-have-won rate
 IDEAL_ENTRY_MIN = 44                 # Era 16: sweet spot is 44-46c (45c = +$25.60, 2.32x W/L ratio)
 IDEAL_ENTRY_MAX = 46                 # Era 16: tighten from 47 — 47c was -$14.52 all-time
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
@@ -1912,7 +1913,12 @@ def execute_trade_enhanced(auth, market, win_prob, ev_per_contract, kelly_frac, 
     yes_ev = calculate_ev(yes_ask, no_ask, win_prob, 'YES')
     no_ev = calculate_ev(yes_ask, no_ask, 1 - win_prob, 'NO')  # FIXED: Explicit NO probability
 
-    if CHEAP_SIDE_MODE:
+    if YES_ONLY_MODE:
+        # Era 19: Always buy YES — structural YES bias (settles 53%+ of the time)
+        direction = 'YES'
+        price = yes_ask
+        ev = yes_ev
+    elif CHEAP_SIDE_MODE:
         # Era 17: Direction already determined by cheaper side
         if yes_ask <= no_ask:
             direction = 'YES'
@@ -1939,8 +1945,8 @@ def execute_trade_enhanced(auth, market, win_prob, ev_per_contract, kelly_frac, 
     min_contracts = market.get('_min_contracts', 1)
 
     if OBSERVATION_MODE:
-        if CHEAP_SIDE_MODE:
-            contracts = 3  # Era 17: fixed sizing like original bot
+        if YES_ONLY_MODE or CHEAP_SIDE_MODE:
+            contracts = 3  # Era 17/19: fixed sizing
         else:
             contracts = min(10, effective_max)  # Legacy paper tracking
     else:
@@ -3500,7 +3506,11 @@ def run_enhanced_15min_trader_fixed():
                         best_ev = max(yes_ev, no_ev)
 
                         # Determine best direction and kelly (needed for logging even when declined)
-                        if CHEAP_SIDE_MODE:
+                        if YES_ONLY_MODE:
+                            # Era 19: Always YES — structural bias (YES settles 53%+, NO 36.6% WR in Era 18)
+                            best_direction = 'YES'
+                            kelly_frac = 0.01  # Nominal — not used for sizing in YES-only mode
+                        elif CHEAP_SIDE_MODE:
                             # Era 17: Original profitable logic — pick the cheaper (higher payoff) side
                             if market['yes_ask'] <= market['no_ask']:
                                 best_direction = 'YES'
@@ -3599,7 +3609,7 @@ def run_enhanced_15min_trader_fixed():
 
                         # GATE 3 — Adaptive Conviction (Era 10: scaled by payoff multiple)
                         # Era 17: Skip in CHEAP_SIDE_MODE — conviction is signal-dependent, irrelevant for cheaper-side logic
-                        if gate_declined is None and not CHEAP_SIDE_MODE:
+                        if gate_declined is None and not CHEAP_SIDE_MODE and not YES_ONLY_MODE:
                             effective_conviction_threshold = MIN_CONVICTION_THRESHOLD / max(payoff_multiple, 1.0)
                             if combined_conviction < effective_conviction_threshold:
                                 gate_declined = 'low_conviction'
@@ -3609,7 +3619,7 @@ def run_enhanced_15min_trader_fixed():
 
                         # GATE 4 — Volatility (skip if too flat to predict)
                         # Era 17: Skip in CHEAP_SIDE_MODE — vol gate is about signal quality, not relevant for cheaper-side
-                        if gate_declined is None and not CHEAP_SIDE_MODE and vol > 0 and vol < VOLATILITY_LOW_THRESHOLD and signal_detail.get('volatility', 0) > 0:
+                        if gate_declined is None and not CHEAP_SIDE_MODE and not YES_ONLY_MODE and vol > 0 and vol < VOLATILITY_LOW_THRESHOLD and signal_detail.get('volatility', 0) > 0:
                             gate_declined = 'low_volatility'
                             decline_reason = f'Low volatility ({vol:.6f} < {VOLATILITY_LOW_THRESHOLD})'
                             print(f"    🚫 [GATE 4] {market['ticker']}: {decline_reason}")

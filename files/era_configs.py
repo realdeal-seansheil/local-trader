@@ -215,4 +215,28 @@ ERA_CONFIGS = {
         'FIXED_CONTRACTS': 3,
         'NOTE': 'Cheap-side direction + signal veto (29.4% WR when disagree). 50c blocked (41.8% WR, -$22.50).',
     },
+    'era19': {
+        'description': 'YES Only: structural YES bias edge. YES 49.9% vs NO 36.6% on 880 Era 18 trades.',
+        'CRYPTO_15MIN_SERIES': ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M'],
+        'YES_ONLY_MODE': True,
+        'CHEAP_SIDE_MODE': True,  # fallback if YES_ONLY_MODE disabled
+        'SIGNAL_VETO_ENABLED': False,  # not needed — no NO picks to veto
+        'MIN_ENTRY_PRICE': 44,
+        'MAX_ENTRY_PRICE': 55,  # expanded — YES at 50-55c had 54-58% would-have-won
+        'MIN_PAYOFF_RATIO': 1.0,
+        'MIN_CONTRACTS': 2,
+        'MAX_CONTRACTS_CEILING': 10,
+        'SIGNAL_TREND_WEIGHT': 0.0,
+        'SIGNAL_CONVERGENCE_WEIGHT': 0.05,
+        'ADAPTIVE_PENALTY_BASE': 0.0,
+        'ADAPTIVE_PENALTY_MAX': 0.0,
+        'PERF_MAX_ADJUSTMENT': 0.0,
+        'REGIME_GATE_ENABLED': False,
+        'REQUIRE_SIGNAL_AGREEMENT': False,
+        'IDEAL_ENTRY_MIN': 44,
+        'IDEAL_ENTRY_MAX': 46,
+        'OBSERVATION_MODE': True,
+        'FIXED_CONTRACTS': 3,
+        'NOTE': 'Always YES direction. YES settles 53%+ structurally. Ceiling expanded to 55c.',
+    },
 }

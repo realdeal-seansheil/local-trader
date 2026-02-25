@@ -45,8 +45,9 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 17: OBSERVATION — Cheap-side direction, fixed sizing, validating
+OBSERVATION_MODE = True        # Era 18: OBSERVATION — Smart Dumb Money: signal veto + 44-49c band
 CHEAP_SIDE_MODE = True         # Era 17: pick cheaper side for direction (original profitable logic)
+SIGNAL_VETO_ENABLED = True     # Era 18: block trades where signal disagrees with cheap-side (29.4% WR when they disagree)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -73,7 +74,7 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
 MIN_ENTRY_PRICE = 44                 # Era 16: cut 41-43c (28-33% WR, -$19.38 combined — well below breakeven)
-MAX_ENTRY_PRICE = 53                 # Era 16: cut 53c+ (negative edge, payoff ratio <1.0x)
+MAX_ENTRY_PRICE = 50                 # Era 18: block 50c (41.8% WR, -$22.50 on 91 trades). Gate 1 uses >= so 50c blocked, 49c passes.
 IDEAL_ENTRY_MIN = 44                 # Era 16: sweet spot is 44-46c (45c = +$25.60, 2.32x W/L ratio)
 IDEAL_ENTRY_MAX = 46                 # Era 16: tighten from 47 — 47c was -$14.52 all-time
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
@@ -3561,6 +3562,15 @@ def run_enhanced_15min_trader_fixed():
                                 gate_declined = 'no_agreement'
                                 decline_reason = f'No signal agreement (signals A/B disagree)'
                                 print(f"    🚫 [GATE 0.5] {market['ticker']}: {decline_reason}")
+
+                        # GATE 0.7 — Signal Veto (Era 18: signal can't pick direction, but can veto bad ones)
+                        # When signal EV disagrees with cheap-side direction: 29.4% WR → decline
+                        if gate_declined is None and CHEAP_SIDE_MODE and SIGNAL_VETO_ENABLED:
+                            signal_direction = 'YES' if yes_ev >= no_ev else 'NO'
+                            if signal_direction != best_direction:
+                                gate_declined = 'signal_veto'
+                                decline_reason = f'Signal veto: signal={signal_direction} disagrees with cheap-side={best_direction}'
+                                print(f"    🚫 [GATE 0.7] {market['ticker']}: {decline_reason}")
 
                         # GATE 1 — Entry Price Band (Era 10: the profit engine — replaces old floor)
                         if gate_declined is None:

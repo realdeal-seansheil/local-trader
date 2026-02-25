@@ -122,6 +122,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 17',
         'label': 'Dumb Money: cheaper-side direction, fixed 3 contracts, 44-53c band (observation)',
         'start': '2026-02-24T14:40:00+00:00',
+        'end': '2026-02-25T16:10:00+00:00',
+    },
+    {
+        'name': 'Era 18',
+        'label': 'Smart Dumb Money: signal veto + 44-49c band (observation)',
+        'start': '2026-02-25T16:10:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

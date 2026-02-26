@@ -45,10 +45,11 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 19: OBSERVATION — YES Only: structural YES bias edge
-YES_ONLY_MODE = True           # Era 19: always buy YES — YES settles 53%+ (49.9% WR vs NO 36.6% on 880 Era 18 trades)
-CHEAP_SIDE_MODE = True         # Era 17: pick cheaper side for direction (fallback if YES_ONLY_MODE=False)
-SIGNAL_VETO_ENABLED = False    # Era 19: disabled — not needed in YES-only mode (no NO picks to veto)
+OBSERVATION_MODE = True        # Era 20: OBSERVATION — Tight Spread Cheap Side
+YES_ONLY_MODE = False          # Era 20: disabled — YES bias is not stable (swings 22-54% WR day-to-day)
+CHEAP_SIDE_MODE = True         # Era 20: directionally agnostic — pick cheaper side
+SIGNAL_VETO_ENABLED = False    # Era 20: signal has no predictive value
+MAX_SPREAD = 3                 # Era 20: only trade when |YES_ask - NO_ask| <= 3c (tight spread = 50.7% WR, +0.94c EV)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -74,8 +75,8 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 # === LAYER 1: Trade Quality Gates ===
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
-MIN_ENTRY_PRICE = 44                 # Era 16: cut 41-43c (28-33% WR, -$19.38 combined — well below breakeven)
-MAX_ENTRY_PRICE = 55                 # Era 19: expanded — YES at 50-55c was blocked but had 54-58% would-have-won rate
+MIN_ENTRY_PRICE = 46                 # Era 20: 46-50c sweet spot (45.7-48.4% cheap-side WR, positive EV zone)
+MAX_ENTRY_PRICE = 50                 # Era 20: cap at 50c (48.1% WR; above 50c edge disappears)
 IDEAL_ENTRY_MIN = 44                 # Era 16: sweet spot is 44-46c (45c = +$25.60, 2.32x W/L ratio)
 IDEAL_ENTRY_MAX = 46                 # Era 16: tighten from 47 — 47c was -$14.52 all-time
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
@@ -3572,6 +3573,15 @@ def run_enhanced_15min_trader_fixed():
                                 gate_declined = 'no_agreement'
                                 decline_reason = f'No signal agreement (signals A/B disagree)'
                                 print(f"    🚫 [GATE 0.5] {market['ticker']}: {decline_reason}")
+
+                        # GATE 0.6 — Spread Filter (Era 20: tight spreads = market indecision = cheap side edge)
+                        # Data: spread ≤3c → 50.7% WR (+0.94c EV) vs spread >10c → 44.6% WR (-EV)
+                        if gate_declined is None and MAX_SPREAD > 0:
+                            spread = abs(market['yes_ask'] - market['no_ask'])
+                            if spread > MAX_SPREAD:
+                                gate_declined = 'wide_spread'
+                                decline_reason = f'Spread too wide ({spread}c > {MAX_SPREAD}c max)'
+                                print(f"    🚫 [GATE 0.6] {market['ticker']}: {decline_reason}")
 
                         # GATE 0.7 — Signal Veto (Era 18: signal can't pick direction, but can veto bad ones)
                         # When signal EV disagrees with cheap-side direction: 29.4% WR → decline

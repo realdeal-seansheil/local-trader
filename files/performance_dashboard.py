@@ -134,6 +134,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 19',
         'label': 'YES Only: structural YES bias, 44-55c band (observation)',
         'start': '2026-02-25T20:15:00+00:00',
+        'end': '2026-02-26T15:10:00+00:00',
+    },
+    {
+        'name': 'Era 20',
+        'label': 'Tight Spread Cheap Side: spread ≤3c, 46-50c band (observation)',
+        'start': '2026-02-26T15:10:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

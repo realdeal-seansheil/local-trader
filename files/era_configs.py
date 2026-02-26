@@ -239,4 +239,18 @@ ERA_CONFIGS = {
         'FIXED_CONTRACTS': 3,
         'NOTE': 'Always YES direction. YES settles 53%+ structurally. Ceiling expanded to 55c.',
     },
+    'era20': {
+        'description': 'Tight Spread Cheap Side: directionally agnostic, spread ≤3c, 46-50c band.',
+        'CRYPTO_15MIN_SERIES': ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M'],
+        'YES_ONLY_MODE': False,
+        'CHEAP_SIDE_MODE': True,
+        'SIGNAL_VETO_ENABLED': False,
+        'MAX_SPREAD': 3,  # only trade when |YES_ask - NO_ask| <= 3c
+        'MIN_ENTRY_PRICE': 46,
+        'MAX_ENTRY_PRICE': 50,
+        'MIN_PAYOFF_RATIO': 1.0,
+        'OBSERVATION_MODE': True,
+        'FIXED_CONTRACTS': 3,
+        'NOTE': 'Directionally agnostic. Tight spread = market indecision = cheap side edge. 50.7% WR on 663 signals.',
+    },
 }

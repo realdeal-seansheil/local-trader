@@ -140,6 +140,12 @@ ERA_BOUNDARIES = [
         'name': 'Era 20',
         'label': 'Tight Spread Cheap Side: spread ≤3c, 46-50c band (observation)',
         'start': '2026-02-26T15:10:00+00:00',
+        'end': '2026-02-27T01:57:00+00:00',
+    },
+    {
+        'name': 'Era 21',
+        'label': 'Pure Era 2 Revival: wide gates 5-55c, signal direction, conviction Kelly (observation)',
+        'start': '2026-02-27T01:57:00+00:00',
         'end': '2099-12-31T23:59:59+00:00',
     },
 ]

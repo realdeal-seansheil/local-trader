@@ -45,11 +45,11 @@ KELLY_FRACTION = 0.5          # Use half-Kelly for safety
 
 # Signal configuration
 USE_MOMENTUM_SIGNAL = True     # ENABLED - Real signal logic implemented
-OBSERVATION_MODE = True        # Era 20: OBSERVATION — Tight Spread Cheap Side
-YES_ONLY_MODE = False          # Era 20: disabled — YES bias is not stable (swings 22-54% WR day-to-day)
-CHEAP_SIDE_MODE = True         # Era 20: directionally agnostic — pick cheaper side
-SIGNAL_VETO_ENABLED = False    # Era 20: signal has no predictive value
-MAX_SPREAD = 3                 # Era 20: only trade when |YES_ask - NO_ask| <= 3c (tight spread = 50.7% WR, +0.94c EV)
+OBSERVATION_MODE = True        # Era 21: paper first, then go live once validated
+YES_ONLY_MODE = False          # Era 21: disabled — use signal-based EV direction (Era 2 style)
+CHEAP_SIDE_MODE = False        # Era 21: disabled — use signal-based EV direction (Era 2 style)
+SIGNAL_VETO_ENABLED = False    # Era 21: not applicable
+MAX_SPREAD = 0                 # Era 21: disabled — no spread filter (Era 2 had none)
 
 # External price feed configuration
 SERIES_TO_BINANCE = {
@@ -75,8 +75,8 @@ SIGNAL_CEILING = 0.65               # Maximum win_prob output
 # === LAYER 1: Trade Quality Gates ===
 MIN_CONVICTION_THRESHOLD = 0.01      # Era 12: restored Era 2 value
 STRONG_CONVICTION_THRESHOLD = 0.03   # Combined win_prob >0.53 or <0.47 = strong conviction
-MIN_ENTRY_PRICE = 46                 # Era 20: 46-50c sweet spot (45.7-48.4% cheap-side WR, positive EV zone)
-MAX_ENTRY_PRICE = 50                 # Era 20: cap at 50c (48.1% WR; above 50c edge disappears)
+MIN_ENTRY_PRICE = 5                  # Era 21: Era 2 value — wide open, let signal decide
+MAX_ENTRY_PRICE = 55                 # Era 21: Era 2 value — full range
 IDEAL_ENTRY_MIN = 44                 # Era 16: sweet spot is 44-46c (45c = +$25.60, 2.32x W/L ratio)
 IDEAL_ENTRY_MAX = 46                 # Era 16: tighten from 47 — 47c was -$14.52 all-time
 MIN_CONTRACTS = 2                    # Era 12: restored Era 2 — this was a real filter (declined 388 weak signals)
@@ -88,7 +88,7 @@ VOLATILITY_LOOKBACK_SECONDS = 900    # 15 min lookback for vol calc
 VOLATILITY_MIN_SAMPLES = 10          # Need this many price points for vol
 VOLATILITY_LOW_THRESHOLD = 0.0001    # Era 9: lowered from 0.0003 — vol gate killed 2 strong-conviction would-have-won signals today
 MIN_CONVICTION_IMPROVEMENT = 0.005   # New signal must beat resting order by 0.5pp to replace it
-MIN_PAYOFF_RATIO = 1.0               # Era 16: only trade when payoff (win/risk) >= 1.0x — gates out 50c+ entries
+MIN_PAYOFF_RATIO = 0.0               # Era 21: disabled — Era 2 didn't have this gate
 # YES_DIRECTION_PENALTY = 0.005      # Replaced by adaptive penalty (Era 8)
 
 # === REGIME GATE (Era 11: DISABLED) ===

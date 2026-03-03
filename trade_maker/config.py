@@ -25,6 +25,11 @@ MAX_EXPOSURE_CENTS = 20000   # Max total deployed = $200
 MAKER_FEE_COEFFICIENT = 0.0175
 TAKER_FEE_COEFFICIENT = 0.07
 
+# === Fill simulation ===
+FILL_CHECK_INTERVAL = 30     # Check for fills every 30s (same as scan interval)
+FILL_TOLERANCE_CENTS = 1     # Count as fill if trade within 1c of our price
+ORDER_EXPIRY_HOURS = 24      # Cancel unfilled virtual orders after 24h
+
 # === Settlement checking ===
 SETTLEMENT_CHECK_INTERVAL = 60  # Check virtual positions for settlement every 60s
 

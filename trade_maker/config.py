@@ -18,8 +18,8 @@ MIN_EDGE_CENTS = 0           # Log all positive EV opportunities (observation mo
 
 # === Position sizing (hypothetical in obs mode) ===
 CONTRACTS_PER_MARKET = 5     # 5 contracts per position
-MAX_POSITIONS = 50           # Max simultaneous virtual positions
-MAX_EXPOSURE_CENTS = 20000   # Max total deployed = $200
+MAX_POSITIONS = 500          # No real capital at risk — capture everything
+MAX_EXPOSURE_CENTS = 500000  # $5,000 virtual exposure — observation only
 
 # === Fee calculation (parabolic Kalshi formula) ===
 MAKER_FEE_COEFFICIENT = 0.0175

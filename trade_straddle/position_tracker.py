@@ -53,6 +53,9 @@ class StraddlePosition:
         # Observation mode tracking
         self.observation = False
 
+        # Fees
+        self.taker_fees = 0  # cents — Kalshi taker fees for this entry
+
         # P&L
         self.pnl_cents = None
         self.pnl_best_case = None    # best case for partial exits (held side wins)
@@ -83,6 +86,7 @@ class StraddlePosition:
             "no_exit_price": self.no_exit_price,
             "exit_time": self.exit_time,
             "observation": self.observation,
+            "taker_fees": self.taker_fees,
             "pnl_cents": self.pnl_cents,
         }
         if self.pnl_best_case is not None:
@@ -111,6 +115,7 @@ class StraddlePosition:
         pos.no_exit_price = d.get("no_exit_price")
         pos.exit_time = d.get("exit_time")
         pos.observation = d.get("observation", False)
+        pos.taker_fees = d.get("taker_fees", 0)
         pos.pnl_cents = d.get("pnl_cents")
         pos.pnl_best_case = d.get("pnl_best_case")
         pos.pnl_actual = d.get("pnl_actual")

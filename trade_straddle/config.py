@@ -1,8 +1,10 @@
 """
-Configuration for the Crypto Straddle Trading Bot.
+Configuration for the Crypto Straddle/Momentum Trading Bot.
 
-Strategy: Buy both YES and NO on Kalshi crypto 15-min markets at open,
-sell whichever side moves in our favor, hold the hedge to expiry.
+Strategies:
+  1. Straddle: Buy both YES and NO at market open, sell one side, hold other.
+  2. Momentum: At T=7min, buy whichever side leads (bid >= 60c), hold to settlement.
+     Direction-agnostic — 86% win rate on 203-market backtest.
 
 All values in CENTS unless otherwise noted.
 """
@@ -49,7 +51,7 @@ EXIT_BEFORE_CLOSE_SECONDS = 60   # Exit all positions 60s before market close
 # ============================================================
 MAX_DAILY_STRADDLES = 5          # Max 5 straddle entries per day
 MAX_DAILY_EXPOSURE_CENTS = 1000  # $10 hard cap (shared balance ~$53)
-OBSERVATION_MODE = True          # True = log everything, execute nothing
+OBSERVATION_MODE = False         # *** LIVE TRADING ***
 
 # ============================================================
 # TIMING
@@ -67,7 +69,44 @@ MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
 # ============================================================
 # TIME RESTRICTIONS
 # ============================================================
-SKIP_HOURS = {8, 9, 10}          # Skip these hours (UTC/local). Morning 06-12 is 35% win, -$30.65 total.
+SKIP_HOURS = set()                # No hour restrictions for momentum strategy (>=75c)
+
+# ============================================================
+# STRADDLE TOGGLE
+# ============================================================
+STRADDLE_ENTRIES_ENABLED = False     # Disable straddle entries (momentum replaces them)
+
+# ============================================================
+# MOMENTUM STRATEGY
+# ============================================================
+MOMENTUM_ENABLED = True              # Enable momentum entry strategy
+MOMENTUM_ENTRY_SECONDS = 420         # Enter at T=420s (7 min into 15-min window)
+MOMENTUM_ENTRY_WINDOW = 30           # ±15s tolerance (405s-435s)
+MOMENTUM_MIN_BID = 75                # Full range — volume > selectivity
+MOMENTUM_CONVICTION_TIERS = {        # contracts by leader bid level
+    75: 8,   # 75-79c → 8 contracts
+    80: 10,  # 80c+   → 10 contracts
+}
+MOMENTUM_MAX_DAILY = 9999             # No limit
+MOMENTUM_MAX_DAILY_EXPOSURE = 999999  # No limit
+
+# Shadow monitoring: log sub-threshold signals for continued observation
+MOMENTUM_SHADOW_MIN_BID = 75         # Still observe signals down to 75c
+
+# Stop-loss observer (runs alongside live trading, logs only — never executes)
+MOMENTUM_STOPLOSS_ENABLED = False    # Disable the observer
+MOMENTUM_STOPLOSS_THRESHOLDS = [-5, -10, -15, -20]  # Test multiple thresholds simultaneously
+
+# Live correlated stop-loss — sells when 2+ series breach threshold in same window
+MOMENTUM_STOPLOSS_LIVE = False         # Disable LIVE stop-loss execution
+MOMENTUM_STOPLOSS_DROP = 11          # Drop threshold in cents from entry price
+MOMENTUM_STOPLOSS_MIN_SERIES = 2     # Need 2+ series breaching to trigger
+
+# ============================================================
+# PASSIVE TICK LOGGING
+# ============================================================
+PASSIVE_TICK_LOGGING = True          # Log all market orderbooks every tick (for momentum analysis)
+PASSIVE_TICK_INTERVAL = 1            # Log every Nth loop cycle (1 = every 3s, 2 = every 6s)
 
 # ============================================================
 # KALSHI FEE

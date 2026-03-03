@@ -23,20 +23,20 @@ from typing import Optional
 # ============================================================
 # CONFIGURATION - UPDATE THESE
 # ============================================================
-KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "YOUR_API_KEY_ID")
+KALSHI_API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "92ddf45c-87ff-42fd-8a86-3f97a0e0d39c")
 # Default key path: look in the files/ directory (shared with 15-min bot)
 _DEFAULT_KEY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "files", "kalshi-key.pem")
 KALSHI_PRIVATE_KEY_PATH = os.environ.get("KALSHI_PRIVATE_KEY_PATH", _DEFAULT_KEY_PATH)
 
 # Use demo for testing, production for live trading
 USE_DEMO = False  # Live API — real market data for scanning
-OBSERVATION_MODE = True  # Log opportunities but do NOT place orders
+OBSERVATION_MODE = False  # *** LIVE TRADING ***
 BASE_URL = "https://demo-api.kalshi.co/trade-api/v2" if USE_DEMO else "https://api.elections.kalshi.com/trade-api/v2"
 
-# Risk controls — conservative for $10 allocation on shared $54 balance
-MAX_POSITION_SIZE = 5          # Max 5 contracts per order (was 100)
-MAX_DAILY_TRADES = 10          # Max 10 trades per day (was 50)
-MAX_DAILY_EXPOSURE = 10        # Max $10 exposure per day (was $5000)
+# Risk controls — momentum strategy: no limits, full tilt
+MAX_POSITION_SIZE = 10         # Max 10 contracts per order (momentum conviction tier)
+MAX_DAILY_TRADES = 99999       # No limit
+MAX_DAILY_EXPOSURE = 999999    # No limit
 MIN_SPREAD_FOR_ARB = 0.03      # 3c minimum spread — accounts for Kalshi fees
 MAX_PRICE_DEVIATION = 0.05     # Skip if Kalshi price is >5c different from signal
 ARB_BOT_MAX_BALANCE_USAGE = 1000  # $10 in cents — hard cap for arb bot allocation
@@ -117,7 +117,10 @@ class KalshiAuth:
             from cryptography.hazmat.primitives.asymmetric import padding
             sig_bytes = self.private_key.sign(
                 msg.encode(),
-                padding.PKCS1v15(),
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.DIGEST_LENGTH,
+                ),
                 hashes.SHA256()
             )
             signature = base64.b64encode(sig_bytes).decode()

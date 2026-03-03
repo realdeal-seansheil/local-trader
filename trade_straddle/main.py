@@ -1,18 +1,21 @@
 """
-Crypto Straddle Trading Bot for Kalshi 15-Min Markets.
+Crypto Trading Bot for Kalshi 15-Min Markets.
 
-Buys both YES and NO at market open, sells whichever side moves +5c.
-Based on distinct-baguette's Polymarket strategy analysis.
+Strategies:
+  1. Straddle (legacy): Buy both YES+NO at open, sell one side, hold other.
+  2. Momentum (active):  At T=7min, buy the leading side (bid>=60c), hold to settlement.
+     Direction-agnostic — 86% win rate on 203-market backtest.
 
 Usage:
-  python main.py straddle   # Run one cycle: enter → monitor → exit
-  python main.py loop       # Continuous: scan all series, enter/exit in real time
+  python main.py loop       # Continuous: momentum entries + passive tick logging
+  python main.py straddle   # Run one straddle cycle (legacy)
   python main.py status     # Show open positions and daily stats
-  python main.py history    # Show completed straddle history
+  python main.py history    # Show completed trade history
   python main.py report     # Full P&L analysis with settlement tracking
   python main.py settle     # Check Kalshi API for settlement results
   python main.py pnl        # Quick rolling P&L by window (settles first)
   python main.py stats      # Analytics: per-series win rates, exit triggers, entry prices
+  python main.py momentum   # Analyze passive tick data for momentum entry signals
 """
 
 import sys
@@ -376,6 +379,152 @@ def cmd_stats():
     executor.print_stats()
 
 
+def cmd_momentum():
+    """Analyze passive tick data for momentum entry signals."""
+    import json
+    import os
+    import glob
+    from config import DATA_DIR
+
+    HISTORY_LOG = os.path.join(DATA_DIR, "straddle_history.jsonl")
+
+    # Load settlement results
+    settled = {}
+    if os.path.exists(HISTORY_LOG):
+        with open(HISTORY_LOG) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        e = json.loads(line)
+                        if e.get("settlement_result") in ("yes", "no"):
+                            settled[e["ticker"]] = e["settlement_result"]
+                    except json.JSONDecodeError:
+                        pass
+
+    # Load passive tick files
+    tick_files = glob.glob(os.path.join(DATA_DIR, "passive_ticks_*.jsonl"))
+    if not tick_files:
+        print("No passive tick data found. Run the bot with PASSIVE_TICK_LOGGING=True first.")
+        return
+
+    # Build per-ticker timelines
+    tickers = {}  # ticker -> list of ticks
+    for tf in tick_files:
+        ticker = os.path.basename(tf).replace("passive_ticks_", "").replace(".jsonl", "")
+        ticks = []
+        with open(tf) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        ticks.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        if ticks:
+            tickers[ticker] = ticks
+
+    print(f"\n{'='*70}")
+    print(f"  MOMENTUM ANALYSIS — Passive Tick Data")
+    print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*70}")
+    print(f"  Passive tick files: {len(tick_files)}")
+    print(f"  Tickers with data:  {len(tickers)}")
+    print(f"  Settled tickers:    {len(settled)}")
+
+    # Filter to tickers with settlement AND tick data
+    analyzable = {t: ticks for t, ticks in tickers.items() if t in settled}
+    print(f"  Analyzable (both):  {len(analyzable)}")
+
+    if not analyzable:
+        # Show data collection progress
+        total_ticks = sum(len(t) for t in tickers.values())
+        print(f"\n  Total passive ticks collected: {total_ticks}")
+        if tickers:
+            sample_ticker = list(tickers.keys())[0]
+            sample_ticks = tickers[sample_ticker]
+            elapsed_range = [t.get("elapsed_s") for t in sample_ticks if t.get("elapsed_s") is not None]
+            if elapsed_range:
+                print(f"  Sample: {sample_ticker}")
+                print(f"    Ticks: {len(sample_ticks)}")
+                print(f"    Elapsed: {min(elapsed_range):.0f}s to {max(elapsed_range):.0f}s")
+        print(f"\n  Waiting for markets to settle. Check back after markets expire.")
+        return
+
+    # === Momentum signal analysis ===
+    print(f"\n  {'='*60}")
+    print(f"  MOMENTUM: Buy leader when bid >= threshold at time T")
+    print(f"  {'='*60}")
+    print(f"\n  {'T(s)':>5} | {'Bid>=':>5} | {'Trades':>6} | {'Win%':>5} | "
+          f"{'AvgAsk':>6} | {'Margin':>6} | {'$/trade':>8} | {'Total P&L':>10}")
+    print(f"  {'─'*70}")
+
+    combos = []
+    for time_point in [15, 30, 45, 60, 90, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 840]:
+        for thresh in [55, 58, 60, 62, 65, 68, 70, 75, 80]:
+            trades = []
+            for ticker, ticks in analyzable.items():
+                sr = settled[ticker]
+                # Find tick closest to time_point
+                best_tick = None
+                best_diff = 999
+                for t in ticks:
+                    es = t.get("elapsed_s")
+                    if es is None:
+                        continue
+                    diff = abs(es - time_point)
+                    if diff < best_diff:
+                        best_diff = diff
+                        best_tick = t
+                if best_tick is None or best_diff > 10:
+                    continue
+
+                yb = best_tick.get("yes_bid", 0)
+                nb = best_tick.get("no_bid", 0)
+
+                if yb >= thresh:
+                    ask = best_tick.get("yes_ask", 100 - nb)
+                    won = (sr == "yes")
+                    pnl = (100 - ask) * 5 if won else -ask * 5
+                    trades.append((pnl, won, ask))
+                elif nb >= thresh:
+                    ask = best_tick.get("no_ask", 100 - yb)
+                    won = (sr == "no")
+                    pnl = (100 - ask) * 5 if won else -ask * 5
+                    trades.append((pnl, won, ask))
+
+            if len(trades) < 5:
+                continue
+
+            wins = sum(1 for _, w, _ in trades if w)
+            total_pnl = sum(p for p, _, _ in trades)
+            wr = wins / len(trades) * 100
+            avg_ask = sum(a for _, _, a in trades) / len(trades)
+            avg_pnl = total_pnl / len(trades)
+            combos.append((total_pnl, time_point, thresh, len(trades), wr, avg_ask, avg_pnl))
+
+    # Sort by total P&L and show top 20
+    combos.sort(key=lambda x: -x[0])
+    for pnl, tp, th, n, wr, aa, ap in combos[:20]:
+        print(f"  {tp:5d} | {th:5d}c | {n:6d} | {wr:4.0f}% | "
+              f"{aa:5.0f}c | {100-aa:5.0f}c | {ap:+7.1f}c | "
+              f"{pnl:+8d}c (${pnl/100:+.2f})")
+
+    # Data coverage summary
+    print(f"\n  {'='*60}")
+    print(f"  DATA COVERAGE")
+    print(f"  {'='*60}")
+    for tp in [30, 60, 120, 180, 300, 450, 600, 750, 900]:
+        count = 0
+        for ticker, ticks in analyzable.items():
+            has = any(abs(t.get("elapsed_s", 0) - tp) < 10 for t in ticks)
+            if has:
+                count += 1
+        print(f"    T={tp:3d}s ({tp/60:4.1f}min): {count:3d} / {len(analyzable)} tickers with data")
+
+    print()
+
+
 COMMANDS = {
     "straddle": cmd_straddle,
     "loop": cmd_loop,
@@ -385,6 +534,7 @@ COMMANDS = {
     "settle": cmd_settle,
     "pnl": cmd_pnl,
     "stats": cmd_stats,
+    "momentum": cmd_momentum,
 }
 
 if __name__ == "__main__":

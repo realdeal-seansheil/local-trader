@@ -43,6 +43,14 @@ from config import (
     ENTRY_WINDOW_SECONDS, KALSHI_FEE_RATE, DATA_DIR,
     LOOP_INTERVAL_SECONDS, MAX_SIMULTANEOUS_POSITIONS,
     SKIP_HOURS,
+    PASSIVE_TICK_LOGGING, PASSIVE_TICK_INTERVAL,
+    STRADDLE_ENTRIES_ENABLED,
+    MOMENTUM_ENABLED, MOMENTUM_ENTRY_SECONDS, MOMENTUM_ENTRY_WINDOW,
+    MOMENTUM_MIN_BID, MOMENTUM_CONVICTION_TIERS, MOMENTUM_MAX_DAILY,
+    MOMENTUM_MAX_DAILY_EXPOSURE,
+    MOMENTUM_STOPLOSS_ENABLED, MOMENTUM_STOPLOSS_THRESHOLDS,
+    MOMENTUM_SHADOW_MIN_BID,
+    MOMENTUM_STOPLOSS_LIVE, MOMENTUM_STOPLOSS_DROP, MOMENTUM_STOPLOSS_MIN_SERIES,
 )
 from position_tracker import PositionTracker
 
@@ -513,6 +521,21 @@ class StraddleExecutor:
         """Return True if the market close time has passed."""
         return self._seconds_to_close(pos) <= 0
 
+    def _compute_elapsed(self, close_time):
+        """Compute seconds elapsed since market open (900s window)."""
+        if not close_time:
+            return None
+        try:
+            ct = close_time
+            if ct.endswith("Z"):
+                ct = ct[:-1] + "+00:00"
+            close_dt = datetime.fromisoformat(ct)
+            close_utc = calendar.timegm(close_dt.timetuple())
+            now_utc = calendar.timegm(datetime.utcnow().timetuple())
+            return round(900 - (close_utc - now_utc), 1)
+        except Exception:
+            return None
+
     def check_position_exits(self):
         """
         Non-blocking, single-pass exit check across ALL positions.
@@ -628,6 +651,9 @@ class StraddleExecutor:
 
         Returns list of positions entered this tick.
         """
+        if not STRADDLE_ENTRIES_ENABLED:
+            return []
+
         # Skip restricted hours
         if datetime.now().hour in SKIP_HOURS:
             return []
@@ -704,6 +730,457 @@ class StraddleExecutor:
 
         return new_entries
 
+    def log_passive_ticks(self):
+        """
+        Poll all crypto series for orderbook data and log ticks.
+        Runs every loop cycle regardless of position status.
+        Captures full 15-min window for momentum strategy analysis.
+        """
+        for series in CRYPTO_SERIES:
+            try:
+                result = self.client.get_markets(
+                    status="open", limit=1, series_ticker=series
+                )
+                markets = result.get("markets", [])
+            except Exception:
+                continue
+
+            if not markets:
+                continue
+
+            market = markets[0]
+            ticker = market.get("ticker", "")
+            close_time = market.get("close_time")
+
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception:
+                continue
+
+            if ob is None:
+                continue
+
+            # Compute elapsed time from market open
+            elapsed_s = self._compute_elapsed(close_time)
+
+            tick_entry = {
+                "ts": datetime.now().isoformat(),
+                "ticker": ticker,
+                "series": series,
+                "elapsed_s": elapsed_s,
+                "yes_bid": ob["yes_bid"],
+                "no_bid": ob["no_bid"],
+                "yes_ask": ob["yes_ask"],
+                "no_ask": ob["no_ask"],
+                "combined_ask": ob["combined_ask"],
+                "yes_depth": ob["yes_bid_depth"],
+                "no_depth": ob["no_bid_depth"],
+            }
+
+            tick_log = os.path.join(DATA_DIR, f"passive_ticks_{ticker}.jsonl")
+            with open(tick_log, "a") as f:
+                f.write(json.dumps(tick_entry) + "\n")
+
+    def scan_momentum_entries(self):
+        """
+        Scan all crypto series for momentum entry signals.
+
+        Strategy: At T~420s (7 min into 15-min window), buy whichever side
+        has bid >= 60c. Direction-agnostic — works for both YES and NO leaders.
+        Hold to settlement.
+
+        Returns list of tickers entered this tick.
+        """
+        if not MOMENTUM_ENABLED:
+            return []
+
+        if datetime.now().hour in SKIP_HOURS:
+            return []
+
+        # Track which tickers we've already entered (momentum)
+        entered = getattr(self, '_momentum_entered', set())
+
+        # Daily limit check
+        daily_count = getattr(self, '_momentum_daily_count', 0)
+        daily_exposure = getattr(self, '_momentum_daily_exposure', 0)
+        if not OBSERVATION_MODE and daily_count >= MOMENTUM_MAX_DAILY:
+            return []
+
+        new_entries = []
+
+        for series in CRYPTO_SERIES:
+            # Skip if already have any active position in this series
+            active = [p for p in self.tracker.positions.values()
+                      if p.status in ("open", "partial_exit") and p.series == series]
+            if active:
+                continue
+
+            try:
+                result = self.client.get_markets(
+                    status="open", limit=1, series_ticker=series
+                )
+                markets = result.get("markets", [])
+            except Exception:
+                continue
+
+            if not markets:
+                continue
+
+            market = markets[0]
+            ticker = market.get("ticker", "")
+            close_time = market.get("close_time")
+
+            # Skip if already entered this ticker
+            if ticker in entered or ticker in self.tracker.positions:
+                continue
+
+            # Compute elapsed seconds
+            elapsed_s = self._compute_elapsed(close_time)
+            if elapsed_s is None:
+                continue
+
+            # Check if we're in the entry window (T=420 +/- 15s)
+            entry_start = MOMENTUM_ENTRY_SECONDS - MOMENTUM_ENTRY_WINDOW // 2
+            entry_end = MOMENTUM_ENTRY_SECONDS + MOMENTUM_ENTRY_WINDOW // 2
+            if not (entry_start <= elapsed_s <= entry_end):
+                continue
+
+            # Get orderbook
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception:
+                continue
+
+            if ob is None:
+                continue
+
+            yes_bid = ob["yes_bid"]
+            no_bid = ob["no_bid"]
+            leader_bid = max(yes_bid, no_bid)
+
+            if leader_bid < MOMENTUM_MIN_BID:
+                # Shadow-log sub-threshold signals for observation
+                if MOMENTUM_SHADOW_MIN_BID and leader_bid >= MOMENTUM_SHADOW_MIN_BID:
+                    shadow_entry = {
+                        "ts": datetime.now().isoformat(),
+                        "ticker": ticker,
+                        "series": series,
+                        "side": "yes" if yes_bid >= no_bid else "no",
+                        "leader_bid": leader_bid,
+                        "ask": ob["yes_ask"] if yes_bid >= no_bid else ob["no_ask"],
+                        "elapsed_s": round(elapsed_s, 1) if elapsed_s else None,
+                    }
+                    shadow_path = os.path.join(DATA_DIR, "momentum_shadow_obs.jsonl")
+                    with open(shadow_path, "a") as f:
+                        f.write(json.dumps(shadow_entry) + "\n")
+                continue  # No signal
+
+            # Determine which side to buy
+            if yes_bid >= no_bid:
+                buy_side = "yes"
+                buy_ask = ob["yes_ask"]
+            else:
+                buy_side = "no"
+                buy_ask = ob["no_ask"]
+
+            # Conviction sizing
+            contracts = 3  # default minimum
+            for bid_level in sorted(MOMENTUM_CONVICTION_TIERS.keys(), reverse=True):
+                if leader_bid >= bid_level:
+                    contracts = MOMENTUM_CONVICTION_TIERS[bid_level]
+                    break
+
+            # Exposure check
+            entry_cost = buy_ask * contracts
+            if not OBSERVATION_MODE and daily_exposure + entry_cost > MOMENTUM_MAX_DAILY_EXPOSURE:
+                continue
+
+            # Enter!
+            print(f"\n  MOMENTUM ENTRY: {ticker}")
+            print(f"    Elapsed: {elapsed_s:.0f}s | Leader: {buy_side.upper()} bid={leader_bid}c ask={buy_ask}c")
+            print(f"    Contracts: {contracts} (conviction tier: bid>={leader_bid}c)")
+            print(f"    Cost: {entry_cost}c (${entry_cost/100:.2f})")
+
+            taker_fees = 0
+            if OBSERVATION_MODE:
+                print(f"    [OBSERVATION MODE — logging entry, not executing]")
+            else:
+                order_result = self.client.place_order(
+                    ticker=ticker, side=buy_side, action="buy",
+                    count=contracts, price=buy_ask,
+                )
+                if "error" in order_result:
+                    print(f"    ERROR placing {buy_side.upper()} buy: {order_result}")
+                    continue
+                taker_fees = order_result.get("order", {}).get("taker_fees", 0)
+                print(f"    Order placed successfully! (fees: {taker_fees}c)")
+
+            # Record as a "straddle" entry with only one side filled
+            # This lets existing settlement tracking work unchanged
+            if buy_side == "yes":
+                pos = self.tracker.open_straddle(
+                    ticker=ticker, series=series,
+                    yes_entry_price=buy_ask, no_entry_price=0,
+                    contracts=contracts, market_close_time=close_time,
+                    observation=OBSERVATION_MODE,
+                )
+            else:
+                pos = self.tracker.open_straddle(
+                    ticker=ticker, series=series,
+                    yes_entry_price=0, no_entry_price=buy_ask,
+                    contracts=contracts, market_close_time=close_time,
+                    observation=OBSERVATION_MODE,
+                )
+
+            # Store taker fees from Kalshi
+            pos.taker_fees = taker_fees
+
+            # Mark as momentum entry + immediately partial_exit (hold to settlement)
+            pos.status = "partial_exit"  # triggers settlement tracking
+            # Store which side we bought for settlement P&L
+            if buy_side == "yes":
+                pos.no_sold = contracts  # mark NO as "sold" at 0c (not held)
+                pos.no_exit_price = 0
+            else:
+                pos.yes_sold = contracts  # mark YES as "sold" at 0c (not held)
+                pos.yes_exit_price = 0
+            pos.exit_time = datetime.now().isoformat()
+            self.tracker.save_state()
+
+            entered.add(ticker)
+            self._momentum_entered = entered
+            daily_count += 1
+            daily_exposure += entry_cost
+            self._momentum_daily_count = daily_count
+            self._momentum_daily_exposure = daily_exposure
+
+            new_entries.append(ticker)
+
+        return new_entries
+
+    def monitor_momentum_stoploss(self):
+        """
+        OBSERVATION-ONLY stop-loss monitor for momentum positions.
+
+        Runs every loop tick alongside live trading. For each active momentum
+        position, checks if the held side's bid has dropped below entry price
+        by more than each configured threshold. Logs what WOULD happen at each
+        threshold level to straddle_stoploss_obs.jsonl for later analysis.
+
+        CRITICAL: This method NEVER:
+          - Calls self.tracker.record_exit()
+          - Calls self.client.place_order()
+          - Modifies any position attributes
+          - Changes position status
+        """
+        # Track peak bids across ticks (persists between calls)
+        peak_bids = getattr(self, '_stoploss_peak_bids', {})
+
+        for pos in list(self.tracker.positions.values()):
+            # Only monitor live momentum positions (partial_exit, not observation)
+            if pos.status != "partial_exit":
+                continue
+            if pos.observation:
+                continue
+
+            ticker = pos.ticker
+
+            # Skip expired markets (settlement handles those)
+            if self._is_market_expired(pos):
+                # Clean up peak tracking for expired positions
+                peak_bids.pop(ticker, None)
+                continue
+
+            # Determine which side we're holding
+            if pos.no_sold > 0 and pos.yes_sold == 0:
+                held_side = "yes"
+                entry_price = pos.yes_entry_price
+            elif pos.yes_sold > 0 and pos.no_sold == 0:
+                held_side = "no"
+                entry_price = pos.no_entry_price
+            else:
+                continue  # Not a momentum position (both sides or neither)
+
+            if entry_price <= 0:
+                continue  # Skip malformed entries
+
+            # Get fresh orderbook
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception:
+                continue
+
+            if ob is None:
+                continue
+
+            # Current bid for our held side
+            current_bid = ob["yes_bid"] if held_side == "yes" else ob["no_bid"]
+
+            # Track peak bid since entry
+            if ticker not in peak_bids or current_bid > peak_bids[ticker]:
+                peak_bids[ticker] = current_bid
+            peak_bid = peak_bids[ticker]
+
+            # Compute drops
+            drop_from_entry = current_bid - entry_price
+            drop_from_peak = current_bid - peak_bid
+
+            # Compute elapsed time
+            elapsed_s = None
+            try:
+                entry_dt = datetime.fromisoformat(pos.entry_time)
+                elapsed_s = (datetime.now() - entry_dt).total_seconds()
+            except Exception:
+                pass
+
+            # Check which thresholds would be hit
+            thresholds_hit = [t for t in MOMENTUM_STOPLOSS_THRESHOLDS
+                              if drop_from_entry <= t]
+
+            # Hypothetical exit P&L if we sold at current bid
+            contracts = pos.contracts
+            hypothetical_exit_pnl = (current_bid - entry_price) * contracts
+
+            # Log to observation file
+            if thresholds_hit or drop_from_entry < 0:
+                obs_entry = {
+                    "ts": datetime.now().isoformat(),
+                    "ticker": ticker,
+                    "side": held_side,
+                    "entry_price": entry_price,
+                    "current_bid": current_bid,
+                    "drop": drop_from_entry,
+                    "peak_bid": peak_bid,
+                    "peak_drop": drop_from_peak,
+                    "elapsed_s": round(elapsed_s, 1) if elapsed_s else None,
+                    "contracts": contracts,
+                    "thresholds_hit": thresholds_hit,
+                    "hypothetical_exit_pnl": hypothetical_exit_pnl,
+                }
+
+                obs_path = os.path.join(DATA_DIR, "straddle_stoploss_obs.jsonl")
+                with open(obs_path, "a") as f:
+                    f.write(json.dumps(obs_entry) + "\n")
+
+            # Print one-line summary when any threshold is hit
+            if thresholds_hit:
+                series_short = self._derive_series(ticker).replace("KX", "").replace("15M", "")
+                thresholds_str = ", ".join(f"{t}c" for t in thresholds_hit)
+                print(f"    [STOP-LOSS OBS] {series_short} {held_side.upper()}@{entry_price}c "
+                      f"→ bid={current_bid}c ({drop_from_entry:+d}c) "
+                      f"would trigger at {thresholds_str}")
+
+        self._stoploss_peak_bids = peak_bids
+
+    def execute_correlated_stoploss(self):
+        """
+        LIVE correlated stop-loss for momentum positions.
+
+        Groups active positions by 15-min window. When 2+ series in the same
+        window have dropped >= MOMENTUM_STOPLOSS_DROP cents from entry,
+        immediately sells ALL breaching positions in that window.
+
+        Uses _execute_sell() which calls record_exit() → status="closed".
+        """
+        # Gather all active momentum positions with their current drops
+        window_positions = defaultdict(list)  # window_key -> [(pos, held_side, entry_price, current_bid, drop)]
+
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "partial_exit":
+                continue
+            if pos.observation:
+                continue
+
+            ticker = pos.ticker
+
+            # Skip expired markets
+            if self._is_market_expired(pos):
+                continue
+
+            # Determine held side and entry price
+            if pos.no_sold > 0 and pos.yes_sold == 0:
+                held_side = "yes"
+                entry_price = pos.yes_entry_price
+            elif pos.yes_sold > 0 and pos.no_sold == 0:
+                held_side = "no"
+                entry_price = pos.no_entry_price
+            else:
+                continue
+
+            if entry_price <= 0:
+                continue
+
+            # Get fresh orderbook
+            try:
+                ob_raw = self.client.get_orderbook(ticker)
+                ob = parse_orderbook(ob_raw)
+            except Exception:
+                continue
+
+            if ob is None:
+                continue
+
+            current_bid = ob["yes_bid"] if held_side == "yes" else ob["no_bid"]
+            drop = current_bid - entry_price
+
+            # Extract window key from ticker (e.g. KXBTC15M-26MAR021500-00 → "26MAR021500")
+            parts = ticker.split("-")
+            window_key = parts[1] if len(parts) >= 2 else ticker
+
+            window_positions[window_key].append((pos, held_side, entry_price, current_bid, drop))
+
+        # Check each window for correlated breach
+        for window_key, positions in window_positions.items():
+            breaching = [(pos, side, ep, bid, drop)
+                         for pos, side, ep, bid, drop in positions
+                         if drop <= -MOMENTUM_STOPLOSS_DROP]
+
+            if len(breaching) < MOMENTUM_STOPLOSS_MIN_SERIES:
+                continue
+
+            # CORRELATED STOP-LOSS TRIGGERED — sell all breaching positions
+            window_time = window_key[-4:] if len(window_key) >= 4 else window_key
+            series_names = []
+            exit_records = []
+
+            for pos, held_side, entry_price, current_bid, drop in breaching:
+                series_short = self._derive_series(pos.ticker).replace("KX", "").replace("15M", "")
+                series_names.append(f"{series_short}@{current_bid}c")
+
+                print(f"    [STOP-LOSS LIVE] Selling {series_short} "
+                      f"{held_side.upper()}@{entry_price}c → bid={current_bid}c ({drop:+d}c)")
+
+                # Execute the sell
+                self._execute_sell(pos, held_side, current_bid, pos.contracts)
+
+                exit_records.append({
+                    "ticker": pos.ticker,
+                    "side": held_side,
+                    "entry": entry_price,
+                    "sold_at": current_bid,
+                    "contracts": pos.contracts,
+                    "pnl": drop * pos.contracts,
+                })
+
+            print(f"    [STOP-LOSS LIVE] Window :{window_time} — "
+                  f"{len(breaching)} series breached -{MOMENTUM_STOPLOSS_DROP}c — "
+                  f"sold {', '.join(series_names)}")
+
+            # Log execution
+            exec_entry = {
+                "ts": datetime.now().isoformat(),
+                "window": window_key,
+                "series_count": len(breaching),
+                "tickers_breaching": [pos.ticker for pos, _, _, _, _ in breaching],
+                "exits": exit_records,
+            }
+            exec_path = os.path.join(DATA_DIR, "straddle_stoploss_exec.jsonl")
+            with open(exec_path, "a") as f:
+                f.write(json.dumps(exec_entry) + "\n")
+
     def run_continuous(self):
         """
         Unified continuous event loop for the straddle bot.
@@ -724,6 +1201,18 @@ class StraddleExecutor:
         print(f"  Loop interval: {LOOP_INTERVAL_SECONDS}s")
         print(f"  Max positions: {MAX_SIMULTANEOUS_POSITIONS}")
         print(f"  Mode: {'OBSERVATION' if OBSERVATION_MODE else '*** LIVE ***'}")
+        if PASSIVE_TICK_LOGGING:
+            print(f"  Passive tick logging: ON (every {PASSIVE_TICK_INTERVAL * LOOP_INTERVAL_SECONDS}s)")
+        if MOMENTUM_ENABLED:
+            print(f"  Momentum strategy: ON (T={MOMENTUM_ENTRY_SECONDS}s, bid>={MOMENTUM_MIN_BID}c)")
+        if MOMENTUM_STOPLOSS_ENABLED:
+            thresholds_str = ", ".join(f"{t}c" for t in MOMENTUM_STOPLOSS_THRESHOLDS)
+            print(f"  Stop-loss observer: ON (thresholds: {thresholds_str}) [OBSERVATION ONLY]")
+        if MOMENTUM_STOPLOSS_LIVE:
+            print(f"  Stop-loss LIVE: ON (correlated {MOMENTUM_STOPLOSS_MIN_SERIES}+ series @ -{MOMENTUM_STOPLOSS_DROP}c)")
+
+        if not STRADDLE_ENTRIES_ENABLED:
+            print(f"  Straddle entries: DISABLED (momentum only)")
         print()
 
         while True:
@@ -736,8 +1225,22 @@ class StraddleExecutor:
             for pos, _, _, _ in exits:
                 self._entered_tickers.add(pos.ticker)
 
+            # Step 1.5: Stop-loss monitor (observation logging + live correlated execution)
+            if MOMENTUM_STOPLOSS_ENABLED:
+                self.monitor_momentum_stoploss()
+            if MOMENTUM_STOPLOSS_LIVE:
+                self.execute_correlated_stoploss()
+
             # Step 2: Scan for new entries
             new_entries = self.scan_for_entries()
+
+            # Step 2b: Passive tick logging (full 15-min orderbook capture)
+            if PASSIVE_TICK_LOGGING and loop_count % PASSIVE_TICK_INTERVAL == 0:
+                self.log_passive_ticks()
+
+            # Step 2c: Momentum entries (buy leader at T~420s)
+            if MOMENTUM_ENABLED:
+                momentum_entries = self.scan_momentum_entries()
 
             # Step 3: Periodic status print (~every 5 min at 3s interval)
             if loop_count % 100 == 1:
@@ -753,6 +1256,14 @@ class StraddleExecutor:
                 self.check_settlements()
                 self.print_rolling_pnl()
                 self.print_stats_compact()
+
+                # Reset momentum daily counters at midnight
+                from datetime import date
+                today = date.today().isoformat()
+                if getattr(self, '_momentum_daily_reset', '') != today:
+                    self._momentum_daily_count = 0
+                    self._momentum_daily_exposure = 0
+                    self._momentum_daily_reset = today
 
             # Step 4: Sleep
             time.sleep(LOOP_INTERVAL_SECONDS)
@@ -805,8 +1316,9 @@ class StraddleExecutor:
         yes_entry = entry.get("yes_entry_price", 0)
         no_entry = entry.get("no_entry_price", 0)
         cost = (yes_entry + no_entry) * contracts
+        fees = entry.get("taker_fees", 0)
 
-        actual_pnl = sell_proceeds + held_payout - cost
+        actual_pnl = sell_proceeds + held_payout - cost - fees
         entry["pnl_actual"] = actual_pnl
 
         # Backfill pnl_best_case for legacy entries
@@ -894,10 +1406,43 @@ class StraddleExecutor:
                 self.tracker.save_state()
                 resolved.append(result)
 
+        # === Part 3: Closed positions (stop-loss, both sides sold — deterministic P&L) ===
+        for pos in list(self.tracker.positions.values()):
+            if pos.status != "closed":
+                continue
+            if pos.observation:
+                continue
+
+            # P&L is deterministic — _calculate_pnl() already ran when
+            # record_exit() set status="closed". pnl_cents is correct.
+            pos.pnl_actual = pos.pnl_cents
+            pos.settlement_result = "stoploss"
+
+            # Check actual market settlement for analysis (was stop-loss a good call?)
+            try:
+                market_data = self.client.get_market(pos.ticker)
+                market = market_data.get("market", market_data)
+                actual_result = market.get("result", "")
+                if actual_result in ("yes", "no"):
+                    pos.settlement_result = f"stoploss_{actual_result}"
+            except Exception:
+                pass  # "stoploss" is fine — we don't need settlement to archive
+
+            print(f"  Archiving stop-loss: {pos.ticker} | P&L: {pos.pnl_cents:+d}c | {pos.settlement_result}")
+
+            self.tracker._archive_position(pos)
+            self.tracker.save_state()
+            resolved.append((pos.ticker, pos.settlement_result, pos.pnl_actual))
+
         return resolved
 
-    def _load_all_straddles(self):
-        """Load all straddles from history + completed positions still in state."""
+    def _load_all_straddles(self, include_observation=False):
+        """Load all straddles from history + completed positions still in state.
+
+        Args:
+            include_observation: If False (default), exclude observation-mode entries.
+                                Set True to include everything (for analysis scripts).
+        """
         entries = []
 
         # 1. History file (archived positions)
@@ -908,7 +1453,10 @@ class StraddleExecutor:
                     line = line.strip()
                     if line:
                         try:
-                            entries.append(json.loads(line))
+                            entry = json.loads(line)
+                            if not include_observation and entry.get("observation", False):
+                                continue  # Skip observation-mode entries
+                            entries.append(entry)
                         except json.JSONDecodeError:
                             pass
 
@@ -916,6 +1464,8 @@ class StraddleExecutor:
         history_tickers = {e.get("ticker") for e in entries}
         for pos in self.tracker.positions.values():
             if pos.status in ("closed", "expired", "partial_exit"):
+                if not include_observation and pos.observation:
+                    continue  # Skip observation-mode entries
                 d = pos.to_dict()
                 # Avoid double-counting: skip if already in history
                 # Use ticker + entry_time as dedup key (same ticker can have re-entries)

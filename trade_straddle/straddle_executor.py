@@ -51,6 +51,7 @@ from config import (
     MOMENTUM_STOPLOSS_ENABLED, MOMENTUM_STOPLOSS_THRESHOLDS,
     MOMENTUM_SHADOW_MIN_BID,
     MOMENTUM_STOPLOSS_LIVE, MOMENTUM_STOPLOSS_DROP, MOMENTUM_STOPLOSS_MIN_SERIES,
+    MOMENTUM_OVERNIGHT_MIN_BID, MOMENTUM_OVERNIGHT_START_HOUR, MOMENTUM_OVERNIGHT_END_HOUR,
 )
 from position_tracker import PositionTracker
 
@@ -860,7 +861,12 @@ class StraddleExecutor:
             no_bid = ob["no_bid"]
             leader_bid = max(yes_bid, no_bid)
 
-            if leader_bid < MOMENTUM_MIN_BID:
+            # Determine effective min bid (higher threshold overnight)
+            current_hour = datetime.now().hour
+            is_overnight = current_hour >= MOMENTUM_OVERNIGHT_START_HOUR or current_hour < MOMENTUM_OVERNIGHT_END_HOUR
+            effective_min_bid = MOMENTUM_OVERNIGHT_MIN_BID if is_overnight else MOMENTUM_MIN_BID
+
+            if leader_bid < effective_min_bid:
                 # Shadow-log sub-threshold signals for observation
                 if MOMENTUM_SHADOW_MIN_BID and leader_bid >= MOMENTUM_SHADOW_MIN_BID:
                     shadow_entry = {
@@ -1205,6 +1211,7 @@ class StraddleExecutor:
             print(f"  Passive tick logging: ON (every {PASSIVE_TICK_INTERVAL * LOOP_INTERVAL_SECONDS}s)")
         if MOMENTUM_ENABLED:
             print(f"  Momentum strategy: ON (T={MOMENTUM_ENTRY_SECONDS}s, bid>={MOMENTUM_MIN_BID}c)")
+            print(f"  Overnight min bid: {MOMENTUM_OVERNIGHT_MIN_BID}c ({MOMENTUM_OVERNIGHT_START_HOUR}:00-{MOMENTUM_OVERNIGHT_END_HOUR}:00 EST)")
         if MOMENTUM_STOPLOSS_ENABLED:
             thresholds_str = ", ".join(f"{t}c" for t in MOMENTUM_STOPLOSS_THRESHOLDS)
             print(f"  Stop-loss observer: ON (thresholds: {thresholds_str}) [OBSERVATION ONLY]")

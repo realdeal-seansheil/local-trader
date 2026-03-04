@@ -98,6 +98,11 @@ MOMENTUM_STOPLOSS_ENABLED = False    # Disable the observer
 MOMENTUM_STOPLOSS_THRESHOLDS = [-5, -10, -15, -20]  # Test multiple thresholds simultaneously
 
 # Live correlated stop-loss — sells when 2+ series breach threshold in same window
+# Overnight protection — raise min bid during thin-liquidity hours
+MOMENTUM_OVERNIGHT_MIN_BID = 85          # Require 85c+ entry overnight (vs 75c daytime)
+MOMENTUM_OVERNIGHT_START_HOUR = 20       # 8:00 PM EST
+MOMENTUM_OVERNIGHT_END_HOUR = 8          # 8:00 AM EST
+
 MOMENTUM_STOPLOSS_LIVE = False         # Disable LIVE stop-loss execution
 MOMENTUM_STOPLOSS_DROP = 11          # Drop threshold in cents from entry price
 MOMENTUM_STOPLOSS_MIN_SERIES = 2     # Need 2+ series breaching to trigger

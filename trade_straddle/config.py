@@ -69,7 +69,7 @@ MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
 # ============================================================
 # TIME RESTRICTIONS
 # ============================================================
-SKIP_HOURS = set()                # No hour restrictions for momentum strategy (>=75c)
+SKIP_HOURS = {5, 8, 11}           # Skip toxic hours: 5am (-$72), 8am (-$88), 11am (-$25)
 
 # ============================================================
 # STRADDLE TOGGLE
@@ -99,7 +99,7 @@ MOMENTUM_STOPLOSS_THRESHOLDS = [-5, -10, -15, -20]  # Test multiple thresholds s
 
 # Live correlated stop-loss — sells when 2+ series breach threshold in same window
 # Overnight protection — raise min bid during thin-liquidity hours
-MOMENTUM_OVERNIGHT_MIN_BID = 85          # Require 85c+ entry overnight (vs 75c daytime)
+MOMENTUM_OVERNIGHT_MIN_BID = 86          # Require 86c+ entry overnight (85c band has 64% WR, worst overnight level)
 MOMENTUM_OVERNIGHT_START_HOUR = 20       # 8:00 PM EST
 MOMENTUM_OVERNIGHT_END_HOUR = 8          # 8:00 AM EST
 

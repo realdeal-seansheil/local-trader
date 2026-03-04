@@ -1209,6 +1209,8 @@ class StraddleExecutor:
         print(f"  Mode: {'OBSERVATION' if OBSERVATION_MODE else '*** LIVE ***'}")
         if PASSIVE_TICK_LOGGING:
             print(f"  Passive tick logging: ON (every {PASSIVE_TICK_INTERVAL * LOOP_INTERVAL_SECONDS}s)")
+        if SKIP_HOURS:
+            print(f"  Skip hours (EST): {sorted(SKIP_HOURS)}")
         if MOMENTUM_ENABLED:
             print(f"  Momentum strategy: ON (T={MOMENTUM_ENTRY_SECONDS}s, bid>={MOMENTUM_MIN_BID}c)")
             print(f"  Overnight min bid: {MOMENTUM_OVERNIGHT_MIN_BID}c ({MOMENTUM_OVERNIGHT_START_HOUR}:00-{MOMENTUM_OVERNIGHT_END_HOUR}:00 EST)")

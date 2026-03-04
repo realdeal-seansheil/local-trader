@@ -223,14 +223,22 @@ class MakerExecutor:
         Check if any pending orders would have been filled.
 
         For each pending order, fetch recent trades and check if any trade
-        occurred at or near our hypothetical maker price. This simulates
+        occurred at our hypothetical maker price (±tolerance). This simulates
         whether a resting limit order would have been matched.
 
-        Fill logic:
-        - favorite_side="no" at price Xc: our NO bid = Xc, implicit YES ask = (100-X)c
-          → fill when taker_side=yes AND yes_price <= (100-X) + tolerance
-        - favorite_side="yes" at price Xc: our YES bid = Xc, implicit NO ask = (100-X)c
-          → fill when taker_side=no AND yes_price >= X - tolerance
+        Fill logic (corrected):
+        - favorite_side="no" at price Xc: we SELL YES at (100-X)c
+          → fill when taker_side=yes AND yes_price ≈ (100-X) ±tolerance
+          → AND trade volume >= our order size
+        - favorite_side="yes" at price Xc: we BUY YES at Xc
+          → fill when taker_side=no AND yes_price ≈ X ±tolerance
+          → AND trade volume >= our order size
+
+        Key fixes from v1:
+        - Removed same-side taker conditions (taker buying same side as us can't fill us)
+        - Added bounded price range (was missing lower bound, counting 2c trades as fills for 13c asks)
+        - Added volume check (trade must have enough contracts to fill our order)
+        - Store taker_side in fill records for future analysis
         """
         if not self.pending_orders:
             return
@@ -276,6 +284,7 @@ class MakerExecutor:
             # Check each trade for a fill match
             favorite_side = order["favorite_side"]
             favorite_price = order["favorite_price"]
+            contracts = order["contracts"]
             order_time_str = order["order_time"]
 
             for trade in trades:
@@ -288,42 +297,37 @@ class MakerExecutor:
                 taker_side = trade.get("taker_side", "")
                 trade_count = trade.get("count", 0)
 
+                # Volume check: trade must have enough contracts to fill our order
+                if trade_count < contracts:
+                    continue
+
                 if favorite_side == "no":
-                    # We're buying NO at favorite_price, selling YES at (100 - favorite_price)
-                    # Fill when taker buys YES at our ask or lower
+                    # We're selling YES at (100 - favorite_price)c
+                    # Fill ONLY when a taker BUYS YES at our ask price (±tolerance)
+                    # taker_side="yes" means the taker is buying YES — our counterparty
                     our_yes_ask = 100 - favorite_price
-                    if taker_side == "yes" and yes_price <= our_yes_ask + FILL_TOLERANCE_CENTS:
-                        filled.append((ticker, trade_time, yes_price, trade_count))
+                    if taker_side == "yes" and abs(yes_price - our_yes_ask) <= FILL_TOLERANCE_CENTS:
+                        filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
-                    # Also: if taker sells YES (taker_side=no buying NO),
-                    # the trade at yes_price means NO was bought at (100-yes_price)
-                    # Fill if NO traded at our price or better
-                    if taker_side == "no":
-                        no_price = 100 - yes_price
-                        if no_price >= favorite_price - FILL_TOLERANCE_CENTS:
-                            filled.append((ticker, trade_time, yes_price, trade_count))
-                            break
 
                 elif favorite_side == "yes":
                     # We're buying YES at favorite_price
-                    # Fill when taker sells to our YES bid (taker_side=no)
-                    if taker_side == "no" and yes_price >= favorite_price - FILL_TOLERANCE_CENTS:
-                        filled.append((ticker, trade_time, yes_price, trade_count))
-                        break
-                    # Also: taker buys YES (taker_side=yes) at our price
-                    if taker_side == "yes" and yes_price >= favorite_price - FILL_TOLERANCE_CENTS:
-                        filled.append((ticker, trade_time, yes_price, trade_count))
+                    # Fill ONLY when a taker SELLS YES into our bid (taker_side=no)
+                    # taker_side="no" means the taker is buying NO (=selling YES) — our counterparty
+                    if taker_side == "no" and abs(yes_price - favorite_price) <= FILL_TOLERANCE_CENTS:
+                        filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
 
             time.sleep(0.1)  # Rate limit trade lookups
 
         # Process fills
-        for ticker, fill_time, fill_yes_price, fill_count in filled:
+        for ticker, fill_time, fill_yes_price, fill_count, fill_taker_side in filled:
             order = self.pending_orders.pop(ticker)
             order["status"] = "filled"
             order["fill_time"] = fill_time
             order["fill_yes_price"] = fill_yes_price
             order["fill_volume"] = fill_count
+            order["fill_taker_side"] = fill_taker_side
             order_placed = datetime.fromisoformat(order["order_time"])
             try:
                 ft = fill_time.replace("Z", "+00:00") if fill_time else ""
@@ -344,6 +348,7 @@ class MakerExecutor:
                 "fill_time": fill_time,
                 "fill_yes_price": fill_yes_price,
                 "fill_volume": fill_count,
+                "fill_taker_side": fill_taker_side,
                 "time_to_fill_s": order["time_to_fill_s"],
                 "favorite_side": order["favorite_side"],
                 "favorite_price": order["favorite_price"],

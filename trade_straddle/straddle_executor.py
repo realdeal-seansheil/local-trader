@@ -796,8 +796,7 @@ class StraddleExecutor:
         if not MOMENTUM_ENABLED:
             return []
 
-        if datetime.now().hour in SKIP_HOURS:
-            return []
+        is_skip_hour = datetime.now().hour in SKIP_HOURS
 
         # Track which tickers we've already entered (momentum)
         entered = getattr(self, '_momentum_entered', set())
@@ -901,6 +900,26 @@ class StraddleExecutor:
             # Exposure check
             entry_cost = buy_ask * contracts
             if not OBSERVATION_MODE and daily_exposure + entry_cost > MOMENTUM_MAX_DAILY_EXPOSURE:
+                continue
+
+            # Shadow-log skip-hour signals (evaluate but don't enter)
+            if is_skip_hour:
+                skip_entry = {
+                    "ts": datetime.now().isoformat(),
+                    "ticker": ticker,
+                    "series": series,
+                    "side": buy_side,
+                    "leader_bid": leader_bid,
+                    "ask": buy_ask,
+                    "contracts": contracts,
+                    "entry_cost_cents": entry_cost,
+                    "elapsed_s": round(elapsed_s, 1),
+                    "hour": datetime.now().hour,
+                    "skipped": True,
+                }
+                skip_path = os.path.join(DATA_DIR, "momentum_skiphour_obs.jsonl")
+                with open(skip_path, "a") as f:
+                    f.write(json.dumps(skip_entry) + "\n")
                 continue
 
             # Enter!

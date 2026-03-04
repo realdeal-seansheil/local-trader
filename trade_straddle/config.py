@@ -69,7 +69,15 @@ MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
 # ============================================================
 # TIME RESTRICTIONS
 # ============================================================
-SKIP_HOURS = {5, 8, 11}           # Skip toxic hours: 5am (-$72), 8am (-$88), 11am (-$25)
+SKIP_HOURS = {3, 5, 8, 11, 13, 14, 20, 23}  # Nuclear: skip all negative-P&L hours
+# 3am: -$14.48 (87% WR, high-price losses)
+# 5am: -$71.93 (72% WR)
+# 8am: -$88.42 (68% WR, worst hour)
+# 11am: -$24.37 (80% WR)
+# 1pm: -$9.03 (84% WR, BTC-specific drag)
+# 2pm: -$3.80 (82% WR)
+# 8pm: -$23.79 (81% WR, not fixed by overnight filter)
+# 11pm: -$14.64 (71% WR, 8-trade losing streak)
 
 # ============================================================
 # STRADDLE TOGGLE

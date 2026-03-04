@@ -1,47 +1,32 @@
 """
-Market Scanner — Scans Kalshi markets for favorite-bias opportunities.
-Identifies markets where one side is priced at extreme levels (1-15c),
-indicating a potential favorite-longshot bias edge on the opposite side.
+Market Scanner — 15-Min Crypto Favorite-Bias Scanner.
+Scans KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M for markets where
+the favorite side is priced at 85-97c (longshot at 3-15c),
+indicating a favorite-longshot bias edge.
 
-Uses targeted series scanning to avoid the API's parlay/multi-variate
-market flood (93%+ of generic results are illiquid KXMVE parlays).
+Uses elapsed-time gating to only evaluate markets in the entry window.
 """
 
 import math
 import time
+import calendar
 from datetime import datetime
 
 from .config import (
+    CRYPTO_SERIES,
     MIN_FAVORITE_PRICE,
     MAX_FAVORITE_PRICE,
     MIN_ORDERBOOK_DEPTH,
     MIN_EDGE_CENTS,
     MAKER_FEE_COEFFICIENT,
     CONTRACTS_PER_MARKET,
+    MAKER_ENTRY_SECONDS,
+    MAKER_ENTRY_WINDOW,
+    SKIP_HOURS,
+    OVERNIGHT_MIN_BID,
+    OVERNIGHT_START_HOUR,
+    OVERNIGHT_END_HOUR,
 )
-
-# Known liquid series on Kalshi — these have real orderbook activity.
-# Updated periodically as new series launch.
-TARGET_SERIES = [
-    # Sports — season/championship futures (lots of extreme prices)
-    "KXNBA", "KXNBAPLAYOFF", "KXNBA1HWINNER", "KXNBA1HTOTAL",
-    "KXNHL", "KXMLB", "KXUFC",
-    "KXNCAAFSPREAD", "KXNCAAHOCKEYGAME",
-    "KXPGAR3LEAD",
-    # Crypto — 15min/hourly/daily bracket markets
-    "KXBTC", "KXETH", "KXSOL", "KXXRP",
-    # Financials / indices
-    "KXINX", "INXD", "INXW",
-    # Economics
-    "KXCPI", "KXGDP", "KXNONFARM", "KXUNEMPLOY",
-    # Politics / elections
-    "KXNEWPOPE",
-    # Weather
-    "KXHIGHTEMP",
-]
-
-# Max markets to fetch per series (pagination)
-MAX_PER_SERIES = 200
 
 
 def calculate_maker_fee(count, price_cents):
@@ -81,115 +66,134 @@ def estimate_edge(longshot_price_cents):
         return 0.0
 
 
-def categorize_market(market):
-    """Infer market category from ticker/title for diversification tracking."""
-    ticker = market.get("ticker", "").upper()
-    title = (market.get("title") or "").lower()
-
-    if any(k in ticker for k in ["KXBTC", "KXETH", "KXSOL", "KXXRP", "BTC", "ETH"]):
-        return "crypto"
-    if any(k in ticker for k in ["INX", "NASDAQ", "SPX", "SPY"]):
-        return "finance"
-    if any(k in ticker for k in ["NFL", "NBA", "MLB", "NHL", "UFC", "PGA", "NCAA"]):
-        return "sports"
-    if any(w in title for w in ["temperature", "weather", "rain", "snow", "hurricane"]):
-        return "weather"
-    if any(w in title for w in ["president", "election", "senate", "congress", "governor", "pope"]):
-        return "politics"
-    if any(w in title for w in ["cpi", "inflation", "fed", "unemployment", "gdp", "nonfarm"]):
-        return "economics"
-    return "other"
-
-
-def scan_markets(client):
+def compute_elapsed(close_time):
     """
-    Scan targeted Kalshi series for favorite-bias opportunities.
-
-    Two-pass approach:
-    1. Fetch markets by series (avoids parlay flood), pre-filter by price/volume
-    2. Fetch orderbooks only for candidates with extreme pricing
-
-    Returns list of opportunity dicts sorted by estimated edge (best first).
+    Compute seconds elapsed since market open (900s window).
+    Returns float seconds or None if unparseable.
+    Pattern copied from straddle_executor._compute_elapsed().
     """
-    # Pass 1: Fetch markets by series, pre-filter by metadata
-    candidates = []
-    total_scanned = 0
-    series_hits = {}
-
-    for series in TARGET_SERIES:
-        try:
-            result = client.get_markets(
-                status="open", limit=MAX_PER_SERIES, series_ticker=series
-            )
-        except Exception as e:
-            continue
-
-        markets = result.get("markets", [])
-        series_count = 0
-
-        for market in markets:
-            total_scanned += 1
-            ticker = market.get("ticker", "")
-
-            # Skip multi-variate / parlay markets that sneak through
-            if "KXMVE" in ticker.upper():
-                continue
-
-            last_price = market.get("last_price", 0)
-            volume = market.get("volume", 0)
-
-            # Must have some activity
-            if last_price == 0 and volume == 0:
-                continue
-
-            # Only interested in extreme prices (longshot territory)
-            if 15 < last_price < 85:
-                continue
-
-            candidates.append(market)
-            series_count += 1
-
-        if series_count > 0:
-            series_hits[series] = series_count
-
-        time.sleep(0.15)  # Light rate limiting between series
-
-    # Pass 2: Fetch orderbooks only for candidates
-    opportunities = []
-    for i, market in enumerate(candidates):
-        opp = _evaluate_market(client, market)
-        if opp:
-            opportunities.append(opp)
-        # Rate limit orderbook calls
-        if i % 10 == 9:
-            time.sleep(0.3)
-
-    # Sort by edge (best first)
-    opportunities.sort(key=lambda x: x["edge_cents"], reverse=True)
-
-    return opportunities, total_scanned, series_hits
-
-
-def _evaluate_market(client, market):
-    """
-    Evaluate a single market for favorite-bias opportunity.
-
-    On Kalshi, the orderbook has YES bids and NO bids. Both tend to be at
-    low levels (1-15c) for extreme-priced markets. We identify the longshot
-    side from last_price and bid levels, then compute the hypothetical maker
-    entry price for the favorite side.
-
-    Key insight: buying the favorite (e.g., NO) as a maker means placing
-    a NO bid. The taker price = 100 - best_longshot_bid. As a maker, we
-    get ~1-2c better by resting an order.
-    """
-    ticker = market.get("ticker", "")
-    last_price = market.get("last_price", 0)
-
+    if not close_time:
+        return None
     try:
-        ob_data = client.get_orderbook(ticker)
+        ct = close_time
+        if ct.endswith("Z"):
+            ct = ct[:-1] + "+00:00"
+        close_dt = datetime.fromisoformat(ct)
+        close_utc = calendar.timegm(close_dt.timetuple())
+        now_utc = calendar.timegm(datetime.utcnow().timetuple())
+        return round(900 - (close_utc - now_utc), 1)
     except Exception:
         return None
+
+
+def is_in_entry_window(elapsed_s):
+    """Check if elapsed time falls within the maker entry window."""
+    entry_start = MAKER_ENTRY_SECONDS - MAKER_ENTRY_WINDOW // 2
+    entry_end = MAKER_ENTRY_SECONDS + MAKER_ENTRY_WINDOW // 2
+    return entry_start <= elapsed_s <= entry_end
+
+
+def is_skip_hour():
+    """Check if current hour is in the nuclear skip set."""
+    return datetime.now().hour in SKIP_HOURS
+
+
+def get_effective_min_bid():
+    """Return the effective minimum favorite bid, accounting for overnight hours."""
+    current_hour = datetime.now().hour
+    is_overnight = current_hour >= OVERNIGHT_START_HOUR or current_hour < OVERNIGHT_END_HOUR
+    return OVERNIGHT_MIN_BID if is_overnight else MIN_FAVORITE_PRICE
+
+
+def scan_crypto_markets(client):
+    """
+    Scan 4 crypto 15-min series for favorite-bias maker opportunities.
+
+    For each series:
+    1. Fetch the current open market (limit=1)
+    2. Compute elapsed time
+    3. Only evaluate if in entry window (T=270s to T=330s)
+    4. Fetch orderbook, identify favorite/longshot, check thresholds
+    5. Apply skip-hour and overnight filters
+
+    Returns (opportunities, scan_metadata).
+    """
+    opportunities = []
+    scan_meta = {
+        "series_scanned": 0,
+        "series_in_window": 0,
+        "series_skipped_hour": 0,
+        "series_no_market": 0,
+        "series_no_signal": 0,
+    }
+
+    skip_hour = is_skip_hour()
+    effective_min_bid = get_effective_min_bid()
+
+    for series in CRYPTO_SERIES:
+        scan_meta["series_scanned"] += 1
+
+        try:
+            result = client.get_markets(
+                status="open", limit=1, series_ticker=series
+            )
+            markets = result.get("markets", [])
+        except Exception:
+            continue
+
+        if not markets:
+            scan_meta["series_no_market"] += 1
+            continue
+
+        market = markets[0]
+        ticker = market.get("ticker", "")
+        close_time = market.get("close_time")
+
+        # Compute elapsed time
+        elapsed_s = compute_elapsed(close_time)
+        if elapsed_s is None:
+            continue
+
+        # Only evaluate if in entry window
+        if not is_in_entry_window(elapsed_s):
+            continue
+
+        scan_meta["series_in_window"] += 1
+
+        # Skip hour check
+        if skip_hour:
+            scan_meta["series_skipped_hour"] += 1
+            continue
+
+        # Fetch orderbook
+        try:
+            ob_data = client.get_orderbook(ticker)
+        except Exception:
+            continue
+
+        opp = _evaluate_crypto_market(
+            market, ob_data, elapsed_s, effective_min_bid
+        )
+
+        if opp:
+            opp["series"] = series
+            opp["elapsed_s"] = elapsed_s
+            opportunities.append(opp)
+        else:
+            scan_meta["series_no_signal"] += 1
+
+    return opportunities, scan_meta
+
+
+def _evaluate_crypto_market(market, ob_data, elapsed_s, effective_min_bid):
+    """
+    Evaluate a single 15-min crypto market for favorite-bias opportunity.
+
+    Identifies the favorite/longshot sides from orderbook bids,
+    estimates edge from academic favorite-longshot bias data,
+    and returns an opportunity dict if criteria are met.
+    """
+    ticker = market.get("ticker", "")
 
     ob = ob_data.get("orderbook", {})
     yes_bids = ob.get("yes", [])
@@ -198,78 +202,47 @@ def _evaluate_market(client, market):
     if not yes_bids and not no_bids:
         return None
 
-    # Best bids on each side
     best_yes_bid = max(b[0] for b in yes_bids) if yes_bids else 0
     best_no_bid = max(b[0] for b in no_bids) if no_bids else 0
 
-    # Identify the longshot side using last_price and bid levels
-    # last_price <= 15 → YES is cheap (longshot YES, favorite NO)
-    # last_price >= 85 → YES is expensive (favorite YES, longshot NO)
-    if last_price <= 15:
-        longshot_side = "yes"
+    # Identify favorite/longshot from bid levels
+    if best_no_bid >= effective_min_bid:
         favorite_side = "no"
-        # Use best NO bid as primary signal for favorite price (more reliable than YES bid)
-        if best_no_bid >= MIN_FAVORITE_PRICE:
-            # Direct NO bid exists — use it as our maker entry price
-            favorite_price = best_no_bid
-            longshot_price = best_yes_bid if best_yes_bid > 0 else last_price
-        elif best_yes_bid > 0:
-            # Infer from YES bid: buying NO at 100 - yes_bid (taker), -1 for maker
-            longshot_price = best_yes_bid
-            favorite_price = 100 - best_yes_bid - 1
-        else:
-            longshot_price = last_price
-            favorite_price = 100 - last_price - 1
-        # Depth: contracts on the longshot bid side (our potential counter-parties)
-        depth = sum(b[1] for b in yes_bids if b[0] >= best_yes_bid - 2) if yes_bids else 0
-        # Also count NO bid depth if available (people willing to buy NO = fellow favorites)
-        if best_no_bid >= MIN_FAVORITE_PRICE:
-            depth = max(depth, sum(b[1] for b in no_bids if b[0] >= best_no_bid - 2))
-    elif last_price >= 85:
-        longshot_side = "no"
+        favorite_price = best_no_bid
+        longshot_price = best_yes_bid if best_yes_bid > 0 else 1
+        depth = sum(b[1] for b in no_bids if b[0] >= best_no_bid - 2)
+    elif best_yes_bid >= effective_min_bid:
         favorite_side = "yes"
-        if best_yes_bid >= MIN_FAVORITE_PRICE:
-            favorite_price = best_yes_bid
-            longshot_price = best_no_bid if best_no_bid > 0 else (100 - last_price)
-        elif best_no_bid > 0:
-            longshot_price = best_no_bid
-            favorite_price = 100 - best_no_bid - 1
-        else:
-            longshot_price = 100 - last_price
-            favorite_price = last_price - 1
-        depth = sum(b[1] for b in no_bids if b[0] >= best_no_bid - 2) if no_bids else 0
-        if best_yes_bid >= MIN_FAVORITE_PRICE:
-            depth = max(depth, sum(b[1] for b in yes_bids if b[0] >= best_yes_bid - 2))
+        favorite_price = best_yes_bid
+        longshot_price = best_no_bid if best_no_bid > 0 else 1
+        depth = sum(b[1] for b in yes_bids if b[0] >= best_yes_bid - 2)
     else:
-        return None  # Mid-range, no clear longshot
+        return None  # No clear favorite at threshold
 
-    # Clamp longshot price for edge estimation
+    # Clamp longshot price
     if longshot_price <= 0:
         longshot_price = 1
     if longshot_price > 15:
-        return None  # Not extreme enough
+        return None  # Not extreme enough for bias edge
 
-    # Check favorite price bounds
-    if favorite_price < MIN_FAVORITE_PRICE or favorite_price > MAX_FAVORITE_PRICE:
+    # Price bounds
+    if favorite_price < effective_min_bid or favorite_price > MAX_FAVORITE_PRICE:
         return None
 
-    # Check depth
+    # Depth check
     if depth < MIN_ORDERBOOK_DEPTH:
         return None
 
-    # Estimate edge
+    # Edge estimation
     edge_pp = estimate_edge(longshot_price)
     if edge_pp <= 0:
         return None
 
-    # EV calculation:
-    # Buy favorite at favorite_price c. Risk = favorite_price. Win = 100 - favorite_price.
-    # Actual win rate = implied + edge from longshot bias.
+    # EV calculation
     implied_win_rate = favorite_price / 100.0
     actual_win_rate = implied_win_rate + edge_pp / 100.0
     win_payout = 100 - favorite_price
     loss_cost = favorite_price
-
     fee = calculate_maker_fee(1, favorite_price)
     ev_per_contract = actual_win_rate * win_payout - (1 - actual_win_rate) * loss_cost - fee
 
@@ -279,7 +252,6 @@ def _evaluate_market(client, market):
     return {
         "ticker": ticker,
         "title": market.get("title", ""),
-        "category": categorize_market(market),
         "favorite_side": favorite_side,
         "favorite_price": favorite_price,
         "longshot_price": longshot_price,

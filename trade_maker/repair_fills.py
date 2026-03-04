@@ -7,7 +7,7 @@ The original fill detection had three bugs:
 3. No volume check: 1-contract trades counted as filling 5-contract orders
 
 This script:
-1. Reads all settled positions from maker_obs_history.jsonl
+1. Reads all settled positions from maker_crypto_history.jsonl
 2. Validates each fill against corrected criteria (price range + volume)
 3. For currently-filled positions in state, attempts API re-validation
 4. Produces corrected data files and reports before/after metrics
@@ -28,9 +28,9 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-OBS_HISTORY = os.path.join(DATA_DIR, "maker_obs_history.jsonl")
-OBS_LOG = os.path.join(DATA_DIR, "maker_obs.jsonl")
-STATE_FILE = os.path.join(DATA_DIR, "maker_state.json")
+OBS_HISTORY = os.path.join(DATA_DIR, "maker_crypto_history.jsonl")
+OBS_LOG = os.path.join(DATA_DIR, "maker_crypto_obs.jsonl")
+STATE_FILE = os.path.join(DATA_DIR, "maker_crypto_state.json")
 
 # Match production config
 FILL_TOLERANCE_CENTS = 1
@@ -297,15 +297,15 @@ def compute_metrics(records, label):
             by_band[band]["losses"] += 1
         by_band[band]["pnl"] += r.get("pnl_cents", 0)
 
-    # By category
-    by_cat = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0})
+    # By series
+    by_series = defaultdict(lambda: {"wins": 0, "losses": 0, "pnl": 0})
     for r in records:
-        cat = r.get("category", "other")
+        series = r.get("series", "unknown")
         if r.get("won"):
-            by_cat[cat]["wins"] += 1
+            by_series[series]["wins"] += 1
         else:
-            by_cat[cat]["losses"] += 1
-        by_cat[cat]["pnl"] += r.get("pnl_cents", 0)
+            by_series[series]["losses"] += 1
+        by_series[series]["pnl"] += r.get("pnl_cents", 0)
 
     print(f"\n  === {label} ===")
     print(f"  Settled: {len(records)} ({wins}W/{losses}L)")
@@ -331,13 +331,13 @@ def compute_metrics(records, label):
             print(f"    {band}: {total} trades ({b['wins']}W/{b['losses']}L) "
                   f"WR={wr:.0f}% P&L={b['pnl']:+d}c")
 
-    print(f"\n  By category:")
-    for cat in sorted(by_cat.keys()):
-        c = by_cat[cat]
-        total = c["wins"] + c["losses"]
-        wr = c["wins"] / total * 100 if total > 0 else 0
-        print(f"    {cat}: {total} trades ({c['wins']}W/{c['losses']}L) "
-              f"WR={wr:.0f}% P&L={c['pnl']:+d}c")
+    print(f"\n  By series:")
+    for series in sorted(by_series.keys()):
+        s = by_series[series]
+        total = s["wins"] + s["losses"]
+        wr = s["wins"] / total * 100 if total > 0 else 0
+        print(f"    {series}: {total} trades ({s['wins']}W/{s['losses']}L) "
+              f"WR={wr:.0f}% P&L={s['pnl']:+d}c")
 
     return {
         "count": len(records),
@@ -352,7 +352,7 @@ def main():
     dry_run = "--dry-run" in sys.argv
 
     print("=" * 60)
-    print("  MAKER FILL DATA REPAIR")
+    print("  MAKER FILL DATA REPAIR (15-Min Crypto)")
     print(f"  Mode: {'DRY RUN (no files modified)' if dry_run else 'LIVE (will modify files)'}")
     print("=" * 60)
 

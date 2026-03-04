@@ -1,12 +1,13 @@
 """
 Maker Observer — Entry Point
-Runs the favorite-bias observation strategy alongside the momentum bot.
+15-min crypto favorite-bias observation strategy.
 
 Usage:
     python -m trade_maker.main
 
-Scans all Kalshi markets for favorite-longshot bias opportunities,
-logs hypothetical trades, and tracks virtual P&L. No orders placed.
+Scans KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M for favorite-longshot
+bias opportunities, logs hypothetical trades, and tracks virtual P&L.
+No orders placed.
 """
 
 import sys
@@ -20,7 +21,7 @@ from trade_maker.maker_executor import MakerExecutor
 
 
 def main():
-    print("\n  Initializing Kalshi API client...")
+    print("\n  Initializing Kalshi API client for 15-min crypto maker...")
     auth = KalshiAuth(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
     client = KalshiClient(auth)
 
@@ -32,11 +33,11 @@ def main():
         print(f"  Warning: Could not fetch balance: {e}")
         print(f"  Continuing anyway (observation mode only needs read-only access)...")
 
-    # Quick market scan test
+    # Quick test: verify we can fetch a crypto series
     try:
-        test = client.get_markets(status="open", limit=5)
+        test = client.get_markets(status="open", limit=1, series_ticker="KXBTC15M")
         count = len(test.get("markets", []))
-        print(f"  API test: found {count} markets (sample)")
+        print(f"  API test: KXBTC15M has {count} open market(s)")
     except Exception as e:
         print(f"  ERROR: Cannot reach Kalshi API: {e}")
         sys.exit(1)

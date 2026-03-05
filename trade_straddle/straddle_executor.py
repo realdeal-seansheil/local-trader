@@ -52,6 +52,10 @@ from config import (
     MOMENTUM_SHADOW_MIN_BID,
     MOMENTUM_STOPLOSS_LIVE, MOMENTUM_STOPLOSS_DROP, MOMENTUM_STOPLOSS_MIN_SERIES,
     MOMENTUM_OVERNIGHT_MIN_BID, MOMENTUM_OVERNIGHT_START_HOUR, MOMENTUM_OVERNIGHT_END_HOUR,
+    BAYESIAN_ENABLED, BAYESIAN_SHADOW_MODE,
+    KELLY_MULTIPLIER, KELLY_USE_LIVE_BALANCE, KELLY_BANKROLL_CENTS,
+    KELLY_BALANCE_CACHE_SECONDS, KELLY_MIN_CONTRACTS, KELLY_MAX_CONTRACTS,
+    KELLY_MAX_BANKROLL_PCT, KELLY_MIN_CONFIDENCE, BAYESIAN_SECONDARY_DAMPENING,
 )
 from position_tracker import PositionTracker
 
@@ -125,6 +129,30 @@ class StraddleExecutor:
         self.auth = KalshiAuth(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
         self.client = KalshiClient(self.auth)
         self.tracker = PositionTracker()
+
+        # Initialize Bayesian signal engine if enabled or in shadow mode
+        self.bayesian = None
+        if BAYESIAN_ENABLED or BAYESIAN_SHADOW_MODE:
+            from bayesian_signal import BayesianSignal
+            self.bayesian = BayesianSignal(
+                data_dir=DATA_DIR,
+                config={
+                    "kelly_multiplier": KELLY_MULTIPLIER,
+                    "bankroll_cents": KELLY_BANKROLL_CENTS,
+                    "min_contracts": KELLY_MIN_CONTRACTS,
+                    "max_contracts": KELLY_MAX_CONTRACTS,
+                    "max_bankroll_pct": KELLY_MAX_BANKROLL_PCT,
+                    "min_confidence": KELLY_MIN_CONFIDENCE,
+                    "fee_rate": KALSHI_FEE_RATE,
+                    "conviction_tiers": MOMENTUM_CONVICTION_TIERS,
+                    "min_bid": MOMENTUM_MIN_BID,
+                    "overnight_min_bid": MOMENTUM_OVERNIGHT_MIN_BID,
+                    "use_live_balance": KELLY_USE_LIVE_BALANCE,
+                    "balance_cache_seconds": KELLY_BALANCE_CACHE_SECONDS,
+                    "secondary_dampening": BAYESIAN_SECONDARY_DAMPENING,
+                },
+                kalshi_client=self.client,
+            )
 
     # ==========================================================
     # PHASE 1: MARKET SELECTION & ENTRY
@@ -860,10 +888,31 @@ class StraddleExecutor:
             no_bid = ob["no_bid"]
             leader_bid = max(yes_bid, no_bid)
 
+            # Determine which side to buy and its ask price
+            if yes_bid >= no_bid:
+                buy_side = "yes"
+                buy_ask = ob["yes_ask"]
+                depth = ob["yes_bid_depth"]
+            else:
+                buy_side = "no"
+                buy_ask = ob["no_ask"]
+                depth = ob["no_bid_depth"]
+
             # Determine effective min bid (higher threshold overnight)
             current_hour = datetime.now().hour
             is_overnight = current_hour >= MOMENTUM_OVERNIGHT_START_HOUR or current_hour < MOMENTUM_OVERNIGHT_END_HOUR
             effective_min_bid = MOMENTUM_OVERNIGHT_MIN_BID if is_overnight else MOMENTUM_MIN_BID
+
+            # ── Bayesian Signal Evaluation ──
+            bayesian_signal = None
+            if self.bayesian is not None:
+                bayesian_signal = self.bayesian.evaluate(
+                    leader_bid=leader_bid,
+                    buy_ask=buy_ask,
+                    series=series,
+                    hour=current_hour,
+                    depth=depth,
+                )
 
             if leader_bid < effective_min_bid:
                 # Shadow-log sub-threshold signals for observation
@@ -872,30 +921,45 @@ class StraddleExecutor:
                         "ts": datetime.now().isoformat(),
                         "ticker": ticker,
                         "series": series,
-                        "side": "yes" if yes_bid >= no_bid else "no",
+                        "side": buy_side,
                         "leader_bid": leader_bid,
-                        "ask": ob["yes_ask"] if yes_bid >= no_bid else ob["no_ask"],
+                        "ask": buy_ask,
                         "elapsed_s": round(elapsed_s, 1) if elapsed_s else None,
                     }
                     shadow_path = os.path.join(DATA_DIR, "momentum_shadow_obs.jsonl")
                     with open(shadow_path, "a") as f:
                         f.write(json.dumps(shadow_entry) + "\n")
+                # Log Bayesian evaluation even for sub-threshold signals
+                if bayesian_signal is not None and BAYESIAN_SHADOW_MODE:
+                    self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                                entered=False, mode="shadow",
+                                                reason="sub_threshold")
                 continue  # No signal
 
-            # Determine which side to buy
-            if yes_bid >= no_bid:
-                buy_side = "yes"
-                buy_ask = ob["yes_ask"]
+            # ── Entry Decision: Bayesian LIVE vs Static ──
+            if BAYESIAN_ENABLED and bayesian_signal is not None:
+                # LIVE Bayesian mode: Kelly controls entry and sizing
+                if not self.bayesian.should_enter(bayesian_signal):
+                    self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                                entered=False, mode="live",
+                                                reason="kelly_negative")
+                    continue  # Bayesian says skip
+                contracts = bayesian_signal.recommended_contracts
+                # Log the live decision
+                self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                            entered=True, mode="live")
             else:
-                buy_side = "no"
-                buy_ask = ob["no_ask"]
-
-            # Conviction sizing
-            contracts = 3  # default minimum
-            for bid_level in sorted(MOMENTUM_CONVICTION_TIERS.keys(), reverse=True):
-                if leader_bid >= bid_level:
-                    contracts = MOMENTUM_CONVICTION_TIERS[bid_level]
-                    break
+                # Static conviction sizing (original logic)
+                contracts = 3  # default minimum
+                for bid_level in sorted(MOMENTUM_CONVICTION_TIERS.keys(), reverse=True):
+                    if leader_bid >= bid_level:
+                        contracts = MOMENTUM_CONVICTION_TIERS[bid_level]
+                        break
+                # Shadow-log what Bayesian WOULD have done
+                if bayesian_signal is not None and BAYESIAN_SHADOW_MODE:
+                    self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                                entered=True, mode="shadow",
+                                                static_contracts=contracts)
 
             # Exposure check
             entry_cost = buy_ask * contracts
@@ -925,7 +989,15 @@ class StraddleExecutor:
             # Enter!
             print(f"\n  MOMENTUM ENTRY: {ticker}")
             print(f"    Elapsed: {elapsed_s:.0f}s | Leader: {buy_side.upper()} bid={leader_bid}c ask={buy_ask}c")
-            print(f"    Contracts: {contracts} (conviction tier: bid>={leader_bid}c)")
+            if bayesian_signal:
+                mode_tag = "BAYES" if BAYESIAN_ENABLED else "STATIC"
+                print(f"    [{mode_tag}] Contracts: {contracts} | "
+                      f"P(win)={bayesian_signal.posterior:.1%} "
+                      f"Kelly={bayesian_signal.kelly_fraction:+.3f} "
+                      f"EV={bayesian_signal.ev_per_contract_cents:+.1f}c/ct "
+                      f"conf={bayesian_signal.confidence}")
+            else:
+                print(f"    Contracts: {contracts} (conviction tier: bid>={leader_bid}c)")
             print(f"    Cost: {entry_cost}c (${entry_cost/100:.2f})")
 
             taker_fees = 0
@@ -984,6 +1056,39 @@ class StraddleExecutor:
             new_entries.append(ticker)
 
         return new_entries
+
+    # Hours that were previously hard-blocked, now Bayesian-managed
+    _FORMERLY_SKIPPED_HOURS = {3, 11, 13, 14, 20, 23}
+
+    def _log_bayesian_decision(self, ticker, series, signal, entered, mode,
+                                static_contracts=None, reason=None):
+        """Log Bayesian signal evaluation to bayesian_decisions.jsonl."""
+        hour = signal.features.get("hour", datetime.now().hour)
+        entry = {
+            "ts": datetime.now().isoformat(),
+            "ticker": ticker,
+            "series": series,
+            "mode": mode,
+            "entered": entered,
+            "posterior": round(signal.posterior, 4),
+            "confidence": signal.confidence,
+            "kelly_fraction": round(signal.kelly_fraction, 4),
+            "recommended_contracts": signal.recommended_contracts,
+            "ev_per_contract": round(signal.ev_per_contract_cents, 2),
+            "bankroll_cents": signal.bankroll_cents,
+            "features": signal.features,
+            "breakdown": signal.breakdown,
+            "old_decision": signal.old_decision,
+            "formerly_skipped_hour": hour in self._FORMERLY_SKIPPED_HOURS,
+        }
+        if static_contracts is not None:
+            entry["static_contracts"] = static_contracts
+        if reason:
+            entry["reason"] = reason
+
+        log_path = os.path.join(DATA_DIR, "bayesian_decisions.jsonl")
+        with open(log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def monitor_momentum_stoploss(self):
         """
@@ -1238,6 +1343,12 @@ class StraddleExecutor:
             print(f"  Stop-loss observer: ON (thresholds: {thresholds_str}) [OBSERVATION ONLY]")
         if MOMENTUM_STOPLOSS_LIVE:
             print(f"  Stop-loss LIVE: ON (correlated {MOMENTUM_STOPLOSS_MIN_SERIES}+ series @ -{MOMENTUM_STOPLOSS_DROP}c)")
+
+        if self.bayesian:
+            if BAYESIAN_ENABLED:
+                print(f"  Bayesian signal engine: *** LIVE *** (Kelly={KELLY_MULTIPLIER}x, max={KELLY_MAX_CONTRACTS}ct)")
+            elif BAYESIAN_SHADOW_MODE:
+                print(f"  Bayesian signal engine: SHADOW (logging only, static logic trades)")
 
         if not STRADDLE_ENTRIES_ENABLED:
             print(f"  Straddle entries: DISABLED (momentum only)")

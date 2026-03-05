@@ -16,6 +16,7 @@ Usage:
   python main.py pnl        # Quick rolling P&L by window (settles first)
   python main.py stats      # Analytics: per-series win rates, exit triggers, entry prices
   python main.py momentum   # Analyze passive tick data for momentum entry signals
+  python main.py bayesian   # Analyze Bayesian signal engine shadow/live decisions
 """
 
 import sys
@@ -525,6 +526,137 @@ def cmd_momentum():
     print()
 
 
+def cmd_bayesian():
+    """Analyze Bayesian signal engine decisions from shadow/live log."""
+    import json
+    import os
+    from config import DATA_DIR, BAYESIAN_ENABLED, BAYESIAN_SHADOW_MODE
+
+    log_path = os.path.join(DATA_DIR, "bayesian_decisions.jsonl")
+    if not os.path.exists(log_path):
+        print("No Bayesian decision log found.")
+        print(f"Enable BAYESIAN_SHADOW_MODE=True in config.py and run the bot.")
+        return
+
+    decisions = []
+    with open(log_path) as f:
+        for line in f:
+            if line.strip():
+                try:
+                    decisions.append(json.loads(line.strip()))
+                except json.JSONDecodeError:
+                    pass
+
+    print(f"\n{'='*65}")
+    print(f"  BAYESIAN SIGNAL ENGINE — Decision Analysis")
+    print(f"  {len(decisions)} decisions logged")
+    print(f"  Mode: {'LIVE' if BAYESIAN_ENABLED else 'SHADOW' if BAYESIAN_SHADOW_MODE else 'OFF'}")
+    print(f"{'='*65}")
+
+    if not decisions:
+        print("  No decisions to analyze yet.")
+        return
+
+    # Compare Bayesian vs static decisions
+    agree_enter = 0
+    agree_skip = 0
+    bayesian_skip_static_enter = 0
+    bayesian_enter_static_skip = 0
+    entries_with_static = []
+
+    for d in decisions:
+        old = d.get("old_decision", {})
+        bayes_would_enter = d.get("recommended_contracts", 0) > 0
+        static_would_enter = old.get("would_enter", False) and old.get("contracts", 0) > 0
+
+        if bayes_would_enter and static_would_enter:
+            agree_enter += 1
+        elif not bayes_would_enter and not static_would_enter:
+            agree_skip += 1
+        elif not bayes_would_enter and static_would_enter:
+            bayesian_skip_static_enter += 1
+            entries_with_static.append(d)
+        elif bayes_would_enter and not static_would_enter:
+            bayesian_enter_static_skip += 1
+
+    total = len(decisions)
+    agree = agree_enter + agree_skip
+    print(f"\n  Decision Comparison (Bayesian vs Static):")
+    print(f"  {'─'*50}")
+    print(f"  Both agree (enter):         {agree_enter:5d}")
+    print(f"  Both agree (skip):          {agree_skip:5d}")
+    print(f"  Bayesian SKIPS, static enters: {bayesian_skip_static_enter:5d}  ← saved trades")
+    print(f"  Bayesian ENTERS, static skips: {bayesian_enter_static_skip:5d}  ← new opportunities")
+    print(f"  Agreement rate:             {agree}/{total} ({agree/total*100:.0f}%)" if total else "")
+
+    # Saved capital analysis
+    if entries_with_static:
+        saved_cents = sum(
+            d.get("old_decision", {}).get("contracts", 0) *
+            d.get("features", {}).get("buy_ask", 0)
+            for d in entries_with_static
+        )
+        print(f"\n  Capital saved by Bayesian skips: {saved_cents}c (${saved_cents/100:.2f})")
+        print(f"  Avg EV of skipped trades: "
+              f"{sum(d.get('ev_per_contract', 0) for d in entries_with_static)/len(entries_with_static):+.1f}c/ct")
+
+    # Kelly distribution
+    kellys = [d.get("kelly_fraction", 0) for d in decisions]
+    positive_k = [k for k in kellys if k > 0]
+    negative_k = [k for k in kellys if k <= 0]
+    print(f"\n  Kelly Distribution:")
+    print(f"  {'─'*50}")
+    print(f"  Positive Kelly (edge exists): {len(positive_k):5d} ({len(positive_k)/total*100:.0f}%)")
+    print(f"  Negative Kelly (no edge):     {len(negative_k):5d} ({len(negative_k)/total*100:.0f}%)")
+    if positive_k:
+        print(f"  Avg positive Kelly:           {sum(positive_k)/len(positive_k):+.3f}")
+
+    # Recent decisions
+    print(f"\n  Recent Decisions (last 15):")
+    print(f"  {'─'*75}")
+    print(f"  {'Series':>6} {'Bid':>4} {'P(win)':>7} {'Kelly':>7} {'EV':>6} {'Bayes':>6} {'Static':>7} {'Action':>7}")
+    for d in decisions[-15:]:
+        short = d.get("series", "?").replace("KX", "").replace("15M", "")
+        bid = d.get("features", {}).get("leader_bid", 0)
+        p = d.get("posterior", 0)
+        k = d.get("kelly_fraction", 0)
+        ev = d.get("ev_per_contract", 0)
+        rc = d.get("recommended_contracts", 0)
+        old_c = d.get("old_decision", {}).get("contracts", 0)
+        sc = d.get("static_contracts")
+        static_str = f"{sc}ct" if sc is not None else f"{old_c}ct"
+        action = "ENTER" if d.get("entered") else "SKIP"
+        reason = d.get("reason", "")
+        if reason:
+            action = f"{action}({reason[:8]})"
+        print(f"  {short:>6} {bid:4d} {p:6.1%} {k:+6.3f} {ev:+5.1f}c {rc:4d}ct {static_str:>7} {action:>12}")
+
+    # Run calibration display
+    print(f"\n  Calibration Tables:")
+    from bayesian_signal import BayesianSignal
+    from config import (KELLY_MULTIPLIER, KELLY_BANKROLL_CENTS, KELLY_MIN_CONTRACTS,
+                        KELLY_MAX_CONTRACTS, KELLY_MAX_BANKROLL_PCT, KELLY_MIN_CONFIDENCE,
+                        KALSHI_FEE_RATE, MOMENTUM_CONVICTION_TIERS, MOMENTUM_MIN_BID,
+                        MOMENTUM_OVERNIGHT_MIN_BID, KELLY_USE_LIVE_BALANCE,
+                        KELLY_BALANCE_CACHE_SECONDS, BAYESIAN_SECONDARY_DAMPENING)
+    engine = BayesianSignal(DATA_DIR, {
+        "kelly_multiplier": KELLY_MULTIPLIER,
+        "bankroll_cents": KELLY_BANKROLL_CENTS,
+        "min_contracts": KELLY_MIN_CONTRACTS,
+        "max_contracts": KELLY_MAX_CONTRACTS,
+        "max_bankroll_pct": KELLY_MAX_BANKROLL_PCT,
+        "min_confidence": KELLY_MIN_CONFIDENCE,
+        "fee_rate": KALSHI_FEE_RATE,
+        "conviction_tiers": MOMENTUM_CONVICTION_TIERS,
+        "min_bid": MOMENTUM_MIN_BID,
+        "overnight_min_bid": MOMENTUM_OVERNIGHT_MIN_BID,
+        "use_live_balance": False,
+        "balance_cache_seconds": KELLY_BALANCE_CACHE_SECONDS,
+        "secondary_dampening": BAYESIAN_SECONDARY_DAMPENING,
+    })
+    print()
+
+
 COMMANDS = {
     "straddle": cmd_straddle,
     "loop": cmd_loop,
@@ -535,6 +667,7 @@ COMMANDS = {
     "pnl": cmd_pnl,
     "stats": cmd_stats,
     "momentum": cmd_momentum,
+    "bayesian": cmd_bayesian,
 }
 
 if __name__ == "__main__":

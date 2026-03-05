@@ -69,15 +69,10 @@ MAX_SIMULTANEOUS_POSITIONS = 4   # One per series max
 # ============================================================
 # TIME RESTRICTIONS
 # ============================================================
-SKIP_HOURS = {3, 5, 8, 11, 13, 14, 20, 23}  # Nuclear: skip all negative-P&L hours
-# 3am: -$14.48 (87% WR, high-price losses)
-# 5am: -$71.93 (72% WR)
-# 8am: -$88.42 (68% WR, worst hour)
-# 11am: -$24.37 (80% WR)
-# 1pm: -$9.03 (84% WR, BTC-specific drag)
-# 2pm: -$3.80 (82% WR)
-# 8pm: -$23.79 (81% WR, not fixed by overnight filter)
-# 11pm: -$14.64 (71% WR, 8-trade losing streak)
+SKIP_HOURS = {5, 8}  # Only truly toxic hours (Bayesian handles the rest)
+# 5am: 78.6% WR, Bayesian still leaks losses (-$15.38)
+# 8am: 71.7% WR, worst hour — Bayesian can't save it
+# Removed: {3, 11, 13, 14, 20, 23} — Bayesian filters profitably (87.4% WR on entered trades)
 
 # ============================================================
 # STRADDLE TOGGLE
@@ -114,6 +109,25 @@ MOMENTUM_OVERNIGHT_END_HOUR = 8          # 8:00 AM EST
 MOMENTUM_STOPLOSS_LIVE = False         # Disable LIVE stop-loss execution
 MOMENTUM_STOPLOSS_DROP = 11          # Drop threshold in cents from entry price
 MOMENTUM_STOPLOSS_MIN_SERIES = 2     # Need 2+ series breaching to trigger
+
+# ============================================================
+# BAYESIAN SIGNAL ENGINE + KELLY SIZING
+# ============================================================
+BAYESIAN_ENABLED = True           # LIVE: Bayesian+Kelly controls entry/sizing
+BAYESIAN_SHADOW_MODE = True       # Also log shadow decisions for comparison
+
+# Kelly position sizing
+KELLY_MULTIPLIER = 0.25           # Quarter-Kelly (conservative start)
+KELLY_USE_LIVE_BALANCE = True     # Pull real balance from Kalshi API (vs static fallback)
+KELLY_BANKROLL_CENTS = 5000       # Fallback bankroll if API call fails ($50)
+KELLY_BALANCE_CACHE_SECONDS = 60  # Cache balance for 60s (avoid hammering API)
+KELLY_MIN_CONTRACTS = 1           # Floor: never bet less than 1 contract
+KELLY_MAX_CONTRACTS = 15          # Cap: never bet more than 15 contracts
+KELLY_MAX_BANKROLL_PCT = 0.05     # Max 5% of bankroll per single trade
+KELLY_MIN_CONFIDENCE = 10         # Require 10+ historical trades in weakest feature bin
+
+# Bayesian posterior tuning
+BAYESIAN_SECONDARY_DAMPENING = 0.3  # Dampening for series/hour shifts (0=ignore, 1=full weight)
 
 # ============================================================
 # PASSIVE TICK LOGGING

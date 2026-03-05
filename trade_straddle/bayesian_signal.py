@@ -76,6 +76,7 @@ class BayesianSignal:
         self.max_bankroll_pct = config.get("max_bankroll_pct", 0.05)
         self.min_confidence = config.get("min_confidence", 10)
         self.fee_rate = config.get("fee_rate", 0.007)
+        self.fee_function = config.get("fee_function", None)  # callable(buy_ask) -> fee per contract
         self.use_live_balance = config.get("use_live_balance", True)
         self.balance_cache_seconds = config.get("balance_cache_seconds", 60)
 
@@ -405,14 +406,20 @@ class BayesianSignal:
         """
         Compute net win and loss amounts per contract, accounting for fees.
 
-        Kalshi charges 0.7% per leg:
-          - Entry fee: buy_ask * fee_rate (paid on buy)
-          - Win settlement: no additional trade fee (settled automatically)
-          - Loss: lose buy_ask, no exit fee (contract expires worthless)
+        Supports two fee models:
+          1. Flat rate (taker): entry_fee = buy_ask * fee_rate
+          2. Custom function (maker): fee_function(buy_ask) -> fee per contract
 
-        Net win = (100 - buy_ask) - entry_fee
-        Net loss = buy_ask + entry_fee
+        Net win = (100 - buy_ask) - fee
+        Net loss = buy_ask + fee
         """
+        if self.fee_function is not None:
+            fee_per_contract = self.fee_function(buy_ask)
+            net_win = (100 - buy_ask) - fee_per_contract
+            net_loss = buy_ask + fee_per_contract
+            return net_win, net_loss
+
+        # Default: flat taker fee (0.7% per leg)
         entry_fee = math.ceil(buy_ask * self.fee_rate * 100) / 100  # round up
         net_win = (100 - buy_ask) - entry_fee
         net_loss = buy_ask + entry_fee

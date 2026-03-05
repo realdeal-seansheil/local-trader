@@ -34,6 +34,13 @@ from .config import (
     MAKER_ENTRY_WINDOW,
     SKIP_HOURS,
     CRYPTO_SERIES,
+    MIN_FAVORITE_PRICE,
+    OVERNIGHT_MIN_BID,
+    BAYESIAN_ENABLED, BAYESIAN_SHADOW_MODE,
+    KELLY_MULTIPLIER, KELLY_USE_LIVE_BALANCE, KELLY_BANKROLL_CENTS,
+    KELLY_BALANCE_CACHE_SECONDS, KELLY_MIN_CONTRACTS, KELLY_MAX_CONTRACTS,
+    KELLY_MAX_BANKROLL_PCT, KELLY_MIN_CONFIDENCE, BAYESIAN_SECONDARY_DAMPENING,
+    maker_fee_per_contract,
 )
 from .market_scanner import scan_crypto_markets, calculate_maker_fee, compute_elapsed
 
@@ -60,6 +67,38 @@ class MakerExecutor:
         self.start_time = datetime.now()
         self._entered_windows = set()  # (series, close_time) tuples for dedup
         self._load_state()
+
+        # Initialize Bayesian signal engine (calibrated on taker's historical data)
+        self.bayesian = None
+        if BAYESIAN_ENABLED or BAYESIAN_SHADOW_MODE:
+            import sys
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sys.path.insert(0, root_dir)
+            from trade_straddle.bayesian_signal import BayesianSignal
+
+            # Use taker's historical data for calibration (1,371 trades, same 4 series)
+            calibration_dir = os.path.join(root_dir, "trade_straddle", "data")
+
+            self.bayesian = BayesianSignal(
+                data_dir=calibration_dir,
+                config={
+                    "kelly_multiplier": KELLY_MULTIPLIER,
+                    "bankroll_cents": KELLY_BANKROLL_CENTS,
+                    "min_contracts": KELLY_MIN_CONTRACTS,
+                    "max_contracts": KELLY_MAX_CONTRACTS,
+                    "max_bankroll_pct": KELLY_MAX_BANKROLL_PCT,
+                    "min_confidence": KELLY_MIN_CONFIDENCE,
+                    "fee_function": maker_fee_per_contract,
+                    "use_live_balance": KELLY_USE_LIVE_BALANCE,
+                    "balance_cache_seconds": KELLY_BALANCE_CACHE_SECONDS,
+                    "secondary_dampening": BAYESIAN_SECONDARY_DAMPENING,
+                    # Maker has no conviction tiers — static is flat 5 contracts
+                    "conviction_tiers": {},
+                    "min_bid": MIN_FAVORITE_PRICE,
+                    "overnight_min_bid": OVERNIGHT_MIN_BID,
+                },
+                kalshi_client=client,
+            )
 
     def _load_state(self):
         """Load state from file."""
@@ -133,6 +172,12 @@ class MakerExecutor:
         print(f"  Skip hours (EST): {sorted(SKIP_HOURS)}")
         print(f"  Max virtual positions: {MAX_POSITIONS}")
         print(f"  Max exposure: ${MAX_EXPOSURE_CENTS / 100:.0f}")
+        if self.bayesian:
+            if BAYESIAN_ENABLED:
+                print(f"  Bayesian signal engine: *** LIVE *** (Kelly={KELLY_MULTIPLIER}x, max={KELLY_MAX_CONTRACTS}ct)")
+                print(f"  Calibration: taker data ({self.bayesian.total_calibration_trades} trades)")
+            elif BAYESIAN_SHADOW_MODE:
+                print(f"  Bayesian signal engine: SHADOW (logging only, static sizing trades)")
         print("=" * 60 + "\n")
 
         last_settlement_check = 0
@@ -217,7 +262,39 @@ class MakerExecutor:
 
             if total_tracked >= MAX_POSITIONS:
                 break
-            position_cost = opp["favorite_price"] * opp["contracts"]
+
+            # ── Bayesian Signal Evaluation ──
+            bayesian_signal = None
+            current_hour = datetime.now().hour
+            if self.bayesian is not None:
+                bayesian_signal = self.bayesian.evaluate(
+                    leader_bid=opp["favorite_price"],
+                    buy_ask=opp["favorite_price"],  # maker pays bid price
+                    series=series,
+                    hour=current_hour,
+                    depth=opp["depth"],
+                )
+
+            # ── Entry Decision: Bayesian LIVE vs Static ──
+            if BAYESIAN_ENABLED and bayesian_signal is not None:
+                # LIVE Bayesian mode: Kelly controls entry and sizing
+                if not self.bayesian.should_enter(bayesian_signal):
+                    self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                                entered=False, mode="live",
+                                                reason="kelly_negative")
+                    continue  # Bayesian says skip
+                contracts = bayesian_signal.recommended_contracts
+                self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                            entered=True, mode="live")
+            else:
+                # Static sizing (original logic)
+                contracts = CONTRACTS_PER_MARKET
+                if bayesian_signal is not None and BAYESIAN_SHADOW_MODE:
+                    self._log_bayesian_decision(ticker, series, bayesian_signal,
+                                                entered=True, mode="shadow",
+                                                static_contracts=contracts)
+
+            position_cost = opp["favorite_price"] * contracts
             if current_exposure + position_cost > MAX_EXPOSURE_CENTS:
                 continue
 
@@ -229,7 +306,7 @@ class MakerExecutor:
                 "favorite_side": opp["favorite_side"],
                 "favorite_price": opp["favorite_price"],
                 "longshot_price": opp["longshot_price"],
-                "contracts": opp["contracts"],
+                "contracts": contracts,
                 "edge_estimate_pp": opp["edge_estimate_pp"],
                 "edge_cents": opp["edge_cents"],
                 "depth": opp["depth"],
@@ -246,6 +323,13 @@ class MakerExecutor:
             total_tracked += 1
             new_count += 1
 
+            if bayesian_signal:
+                mode_tag = "BAYES" if BAYESIAN_ENABLED else "STATIC"
+                print(f"  [{mode_tag}] {ticker}: {opp['favorite_side'].upper()} @{opp['favorite_price']}c "
+                      f"→ {contracts}ct | P(win)={bayesian_signal.posterior:.1%} "
+                      f"Kelly={bayesian_signal.kelly_fraction:+.3f} "
+                      f"EV={bayesian_signal.ev_per_contract_cents:+.1f}c")
+
             self._log_jsonl(OBS_LOG, {
                 "type": "order_placed",
                 "ts": datetime.now().isoformat(),
@@ -256,6 +340,38 @@ class MakerExecutor:
             print(f"  +{new_count} new pending orders "
                   f"(pending:{len(self.pending_orders)} filled:{len(self.filled_positions)} "
                   f"exposure:${current_exposure / 100:.2f})")
+
+    # Hours that were previously hard-blocked, now Bayesian-managed
+    _FORMERLY_SKIPPED_HOURS = {3, 11, 13, 14, 20, 23}
+
+    def _log_bayesian_decision(self, ticker, series, signal, entered, mode,
+                                static_contracts=None, reason=None):
+        """Log Bayesian signal evaluation to maker_bayesian_decisions.jsonl."""
+        hour = signal.features.get("hour", datetime.now().hour)
+        entry = {
+            "ts": datetime.now().isoformat(),
+            "ticker": ticker,
+            "series": series,
+            "mode": mode,
+            "entered": entered,
+            "posterior": round(signal.posterior, 4),
+            "confidence": signal.confidence,
+            "kelly_fraction": round(signal.kelly_fraction, 4),
+            "recommended_contracts": signal.recommended_contracts,
+            "ev_per_contract": round(signal.ev_per_contract_cents, 2),
+            "bankroll_cents": signal.bankroll_cents,
+            "features": signal.features,
+            "breakdown": signal.breakdown,
+            "old_decision": signal.old_decision,
+            "formerly_skipped_hour": hour in self._FORMERLY_SKIPPED_HOURS,
+        }
+        if static_contracts is not None:
+            entry["static_contracts"] = static_contracts
+        if reason:
+            entry["reason"] = reason
+
+        log_path = os.path.join(DATA_DIR, "maker_bayesian_decisions.jsonl")
+        self._log_jsonl(log_path, entry)
 
     def _check_fills(self):
         """

@@ -101,7 +101,7 @@ class MakerExecutor:
             )
 
     # Set to True to reset counters on next startup (fresh data collection)
-    _RESET_COUNTERS_ON_LOAD = True
+    _RESET_COUNTERS_ON_LOAD = False
 
     def _load_state(self):
         """Load state from file."""

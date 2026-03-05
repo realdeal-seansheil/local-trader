@@ -100,6 +100,9 @@ class MakerExecutor:
                 kalshi_client=client,
             )
 
+    # Set to True to reset counters on next startup (fresh data collection)
+    _RESET_COUNTERS_ON_LOAD = True
+
     def _load_state(self):
         """Load state from file."""
         if os.path.exists(STATE_FILE):
@@ -108,10 +111,20 @@ class MakerExecutor:
                     state = json.load(f)
                 self.pending_orders = state.get("pending_orders", {})
                 self.filled_positions = state.get("filled_positions", {})
-                self.settled_count = state.get("settled_count", 0)
-                self.total_hypothetical_pnl = state.get("total_hypothetical_pnl", 0)
-                self.fill_count = state.get("fill_count", 0)
-                self.expire_count = state.get("expire_count", 0)
+
+                if self._RESET_COUNTERS_ON_LOAD:
+                    # Fresh start: zero counters, keep any active positions
+                    self.settled_count = 0
+                    self.total_hypothetical_pnl = 0
+                    self.fill_count = len(self.filled_positions)  # count current fills
+                    self.expire_count = 0
+                    print("  *** Counters reset for fresh Bayesian data collection ***")
+                else:
+                    self.settled_count = state.get("settled_count", 0)
+                    self.total_hypothetical_pnl = state.get("total_hypothetical_pnl", 0)
+                    self.fill_count = state.get("fill_count", 0)
+                    self.expire_count = state.get("expire_count", 0)
+
                 self._entered_windows = set(
                     tuple(w) for w in state.get("entered_windows", [])
                 )

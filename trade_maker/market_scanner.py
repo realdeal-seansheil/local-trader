@@ -1,10 +1,10 @@
 """
-Market Scanner — 15-Min Crypto Favorite-Bias Scanner.
-Scans KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M for markets where
-the favorite side is priced at 85-97c (longshot at 3-15c),
-indicating a favorite-longshot bias edge.
+Market Scanner — 15-Min Crypto Momentum Scanner (mirrors taker strategy).
+Scans KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M for momentum entries.
+At T=420s (7 min), buys whichever side leads (bid >= 75c).
+Places virtual limit orders at the bid price (maker positioning).
 
-Uses elapsed-time gating to only evaluate markets in the entry window.
+Tests whether the taker's 93% WR momentum signal works with 4x lower maker fees.
 """
 
 import math
@@ -15,9 +15,7 @@ from datetime import datetime
 from .config import (
     CRYPTO_SERIES,
     MIN_FAVORITE_PRICE,
-    MAX_FAVORITE_PRICE,
     MIN_ORDERBOOK_DEPTH,
-    MIN_EDGE_CENTS,
     MAKER_FEE_COEFFICIENT,
     CONTRACTS_PER_MARKET,
     MAKER_ENTRY_SECONDS,
@@ -34,36 +32,6 @@ def calculate_maker_fee(count, price_cents):
     p = price_cents / 100.0
     raw = MAKER_FEE_COEFFICIENT * count * p * (1 - p) * 100
     return math.ceil(raw) if raw > 0 else 0
-
-
-def estimate_edge(longshot_price_cents):
-    """
-    Estimate the favorite-longshot bias edge based on the cheap side's price.
-
-    Academic data (Kalshi-specific, from CEPR/Becker studies):
-    - Contracts at 1c: actual win rate ~0.4% (implied 1%) → ~60% overpriced
-    - Contracts at 5c: actual ~3% (implied 5%) → ~40% overpriced
-    - Contracts at 10c: actual ~8% (implied 10%) → ~20% overpriced
-    - Contracts at 15c: actual ~13% (implied 15%) → ~13% overpriced
-
-    Returns estimated edge in percentage points (e.g., 2.0 means 2pp edge).
-    """
-    if longshot_price_cents <= 1:
-        return 0.6   # ~0.6% actual vs 1% implied
-    elif longshot_price_cents <= 3:
-        return 2.0
-    elif longshot_price_cents <= 5:
-        return 2.0
-    elif longshot_price_cents <= 7:
-        return 1.5
-    elif longshot_price_cents <= 10:
-        return 1.5
-    elif longshot_price_cents <= 12:
-        return 1.0
-    elif longshot_price_cents <= 15:
-        return 0.7
-    else:
-        return 0.0
 
 
 def compute_elapsed(close_time):
@@ -87,7 +55,7 @@ def compute_elapsed(close_time):
 
 
 def is_in_entry_window(elapsed_s):
-    """Check if elapsed time falls within the maker entry window."""
+    """Check if elapsed time falls within the momentum entry window."""
     entry_start = MAKER_ENTRY_SECONDS - MAKER_ENTRY_WINDOW // 2
     entry_end = MAKER_ENTRY_SECONDS + MAKER_ENTRY_WINDOW // 2
     return entry_start <= elapsed_s <= entry_end
@@ -99,7 +67,7 @@ def is_skip_hour():
 
 
 def get_effective_min_bid():
-    """Return the effective minimum favorite bid, accounting for overnight hours."""
+    """Return the effective minimum bid, accounting for overnight hours."""
     current_hour = datetime.now().hour
     is_overnight = current_hour >= OVERNIGHT_START_HOUR or current_hour < OVERNIGHT_END_HOUR
     return OVERNIGHT_MIN_BID if is_overnight else MIN_FAVORITE_PRICE
@@ -107,13 +75,13 @@ def get_effective_min_bid():
 
 def scan_crypto_markets(client):
     """
-    Scan 4 crypto 15-min series for favorite-bias maker opportunities.
+    Scan 4 crypto 15-min series for momentum maker opportunities.
 
-    For each series:
+    Mirrors the taker's momentum strategy:
     1. Fetch the current open market (limit=1)
     2. Compute elapsed time
-    3. Only evaluate if in entry window (T=270s to T=330s)
-    4. Fetch orderbook, identify favorite/longshot, check thresholds
+    3. Only evaluate if in entry window (T=405s to T=435s)
+    4. Fetch orderbook, identify leader side, check thresholds
     5. Apply skip-hour and overnight filters
 
     Returns (opportunities, scan_metadata).
@@ -171,7 +139,7 @@ def scan_crypto_markets(client):
         except Exception:
             continue
 
-        opp = _evaluate_crypto_market(
+        opp = _evaluate_momentum(
             market, ob_data, elapsed_s, effective_min_bid
         )
 
@@ -185,13 +153,18 @@ def scan_crypto_markets(client):
     return opportunities, scan_meta
 
 
-def _evaluate_crypto_market(market, ob_data, elapsed_s, effective_min_bid):
+def _evaluate_momentum(market, ob_data, elapsed_s, effective_min_bid):
     """
-    Evaluate a single 15-min crypto market for favorite-bias opportunity.
+    Evaluate a single 15-min crypto market for momentum signal.
 
-    Identifies the favorite/longshot sides from orderbook bids,
-    estimates edge from academic favorite-longshot bias data,
-    and returns an opportunity dict if criteria are met.
+    Mirrors the taker's logic:
+    1. Parse orderbook → yes_bid, no_bid
+    2. leader_bid = max(yes_bid, no_bid) — signal strength
+    3. buy_side = whichever side has higher bid
+    4. buy_price = leader_bid (our limit order rests at the bid)
+    5. Check leader_bid >= effective_min_bid
+
+    Returns opportunity dict or None.
     """
     ticker = market.get("ticker", "")
 
@@ -205,59 +178,37 @@ def _evaluate_crypto_market(market, ob_data, elapsed_s, effective_min_bid):
     best_yes_bid = max(b[0] for b in yes_bids) if yes_bids else 0
     best_no_bid = max(b[0] for b in no_bids) if no_bids else 0
 
-    # Identify favorite/longshot from bid levels
-    if best_no_bid >= effective_min_bid:
-        favorite_side = "no"
-        favorite_price = best_no_bid
-        longshot_price = best_yes_bid if best_yes_bid > 0 else 1
-        depth = sum(b[1] for b in no_bids if b[0] >= best_no_bid - 2)
-    elif best_yes_bid >= effective_min_bid:
-        favorite_side = "yes"
-        favorite_price = best_yes_bid
-        longshot_price = best_no_bid if best_no_bid > 0 else 1
-        depth = sum(b[1] for b in yes_bids if b[0] >= best_yes_bid - 2)
-    else:
-        return None  # No clear favorite at threshold
+    # Leader = whichever side has higher bid (momentum signal)
+    leader_bid = max(best_yes_bid, best_no_bid)
 
-    # Clamp longshot price
-    if longshot_price <= 0:
-        longshot_price = 1
-    if longshot_price > 15:
-        return None  # Not extreme enough for bias edge
-
-    # Price bounds
-    if favorite_price < effective_min_bid or favorite_price > MAX_FAVORITE_PRICE:
+    if leader_bid < effective_min_bid:
         return None
+
+    # Determine buy side and compute depth
+    if best_yes_bid >= best_no_bid:
+        buy_side = "yes"
+        depth = sum(b[1] for b in yes_bids if b[0] >= best_yes_bid - 2)
+        # Ask price on YES side: look at NO bids to infer
+        # yes_ask ≈ 100 - best_no_bid (if no NO bids, use leader_bid + 1)
+        buy_ask = (100 - best_no_bid) if best_no_bid > 0 else leader_bid + 1
+    else:
+        buy_side = "no"
+        depth = sum(b[1] for b in no_bids if b[0] >= best_no_bid - 2)
+        # Ask price on NO side: 100 - best_yes_bid
+        buy_ask = (100 - best_yes_bid) if best_yes_bid > 0 else leader_bid + 1
 
     # Depth check
     if depth < MIN_ORDERBOOK_DEPTH:
         return None
 
-    # Edge estimation
-    edge_pp = estimate_edge(longshot_price)
-    if edge_pp <= 0:
-        return None
-
-    # EV calculation
-    implied_win_rate = favorite_price / 100.0
-    actual_win_rate = implied_win_rate + edge_pp / 100.0
-    win_payout = 100 - favorite_price
-    loss_cost = favorite_price
-    fee = calculate_maker_fee(1, favorite_price)
-    ev_per_contract = actual_win_rate * win_payout - (1 - actual_win_rate) * loss_cost - fee
-
-    if ev_per_contract <= MIN_EDGE_CENTS:
-        return None
-
     return {
         "ticker": ticker,
         "title": market.get("title", ""),
-        "favorite_side": favorite_side,
-        "favorite_price": favorite_price,
-        "longshot_price": longshot_price,
+        "buy_side": buy_side,
+        "buy_price": leader_bid,       # our limit order price (at the bid)
+        "buy_ask": buy_ask,            # what taker would pay (for Bayesian comparison)
+        "leader_bid": leader_bid,      # signal strength
         "depth": depth,
-        "edge_estimate_pp": round(edge_pp, 2),
-        "edge_cents": round(ev_per_contract, 2),
         "contracts": CONTRACTS_PER_MARKET,
         "close_time": market.get("close_time", ""),
         "scan_time": datetime.now().isoformat(),

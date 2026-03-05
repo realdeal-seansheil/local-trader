@@ -1,7 +1,8 @@
 """
 Maker Strategy Configuration — 15-Min Crypto Markets (Observation Mode)
-Favorite-longshot bias on KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M.
-Posts virtual maker bids on the favorite side, tracks fills via trades API.
+Momentum strategy (mirrors taker) on KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M.
+Posts virtual maker bids on the momentum side, tracks fills via trades API.
+Tests whether taker's 93% WR momentum signal works with 4x lower maker fees.
 """
 
 # === Observation mode ===
@@ -15,17 +16,15 @@ CRYPTO_SERIES = [
     "KXXRP15M",   # XRP 15-min
 ]
 
-# === Timing ===
+# === Timing (mirrors taker: T=420s ±15s) ===
 SCAN_INTERVAL_SECONDS = 10       # Scan every 10s (short-lived markets need faster checks)
-MAKER_ENTRY_SECONDS = 300        # Post virtual order at T=300s (5 min into 15-min window)
-MAKER_ENTRY_WINDOW = 60          # Entry window: T=270s to T=330s (±30s tolerance)
+MAKER_ENTRY_SECONDS = 420        # Post virtual order at T=420s (7 min into 15-min window)
+MAKER_ENTRY_WINDOW = 30          # Entry window: T=405s to T=435s (±15s tolerance)
 MAKER_DEADLINE_SECONDS = 840     # Stop accepting fills after T=840s (14 min, 1 min before close)
 
-# === Entry criteria ===
-MIN_FAVORITE_PRICE = 85          # Only buy favorites at 85c+ (longshot at 15c-)
-MAX_FAVORITE_PRICE = 97          # Don't buy above 97c (too thin)
+# === Entry criteria (mirrors taker momentum thresholds) ===
+MIN_FAVORITE_PRICE = 75          # Momentum min bid (same as taker MOMENTUM_MIN_BID)
 MIN_ORDERBOOK_DEPTH = 3          # Minimum contracts at entry price level
-MIN_EDGE_CENTS = 0               # Log all positive EV (observation mode)
 
 # === Position sizing (hypothetical in obs mode) ===
 CONTRACTS_PER_MARKET = 5         # 5 contracts per virtual position

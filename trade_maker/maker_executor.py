@@ -1,8 +1,8 @@
 """
-Maker Executor — 15-Min Crypto Favorite-Bias Observation Strategy.
-Scans KXBTC15M, KXETH15M, KXSOL15M, KXXRP15M for favorite-longshot
-bias opportunities, simulates maker limit orders, tracks fill rates,
-and computes hypothetical P&L from settlement results.
+Maker Executor — 15-Min Crypto Momentum Observation Strategy.
+Mirrors the taker's momentum signal (T=420s, leader_bid) but places
+virtual maker limit orders at the bid. Tests whether taker's 93% WR
+works with 4x lower maker fees, and measures fill rates.
 
 Virtual order lifecycle:
   spotted → pending (resting order) → filled (trade at our price) → settled (market resolves)
@@ -15,7 +15,7 @@ import os
 import json
 import time
 import calendar
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 from .config import (
@@ -101,7 +101,7 @@ class MakerExecutor:
             )
 
     # Set to True to reset counters on next startup (fresh data collection)
-    _RESET_COUNTERS_ON_LOAD = False
+    _RESET_COUNTERS_ON_LOAD = True  # FLIP TO FALSE after first startup
 
     def _load_state(self):
         """Load state from file."""
@@ -175,7 +175,7 @@ class MakerExecutor:
     def run_continuous(self):
         """Main observation loop."""
         print("\n" + "=" * 60)
-        print("  MAKER OBSERVER — 15-Min Crypto Favorite Bias")
+        print("  MAKER OBSERVER — 15-Min Crypto MOMENTUM (mirrors taker)")
         print("  Mode: OBSERVATION ONLY (no orders placed)")
         print(f"  Series: {', '.join(CRYPTO_SERIES)}")
         print(f"  Entry window: T={MAKER_ENTRY_SECONDS}s ±{MAKER_ENTRY_WINDOW // 2}s")
@@ -253,7 +253,7 @@ class MakerExecutor:
 
         # Current exposure (pending + filled)
         current_exposure = sum(
-            p["favorite_price"] * p["contracts"]
+            p.get("buy_price", p.get("favorite_price", 0)) * p["contracts"]
             for p in list(self.pending_orders.values()) + list(self.filled_positions.values())
         )
         total_tracked = len(self.pending_orders) + len(self.filled_positions)
@@ -281,8 +281,8 @@ class MakerExecutor:
             current_hour = datetime.now().hour
             if self.bayesian is not None:
                 bayesian_signal = self.bayesian.evaluate(
-                    leader_bid=opp["favorite_price"],
-                    buy_ask=opp["favorite_price"],  # maker pays bid price
+                    leader_bid=opp["leader_bid"],
+                    buy_ask=opp["buy_price"],  # maker pays bid price (limit order)
                     series=series,
                     hour=current_hour,
                     depth=opp["depth"],
@@ -307,23 +307,22 @@ class MakerExecutor:
                                                 entered=True, mode="shadow",
                                                 static_contracts=contracts)
 
-            position_cost = opp["favorite_price"] * contracts
+            position_cost = opp["buy_price"] * contracts
             if current_exposure + position_cost > MAX_EXPOSURE_CENTS:
                 continue
 
-            # Create PENDING virtual order
+            # Create PENDING virtual order (momentum fields)
             order = {
                 "ticker": ticker,
                 "title": opp["title"],
                 "series": series,
-                "favorite_side": opp["favorite_side"],
-                "favorite_price": opp["favorite_price"],
-                "longshot_price": opp["longshot_price"],
+                "buy_side": opp["buy_side"],
+                "buy_price": opp["buy_price"],         # limit order at bid
+                "buy_ask": opp.get("buy_ask", 0),      # what taker would pay (for comparison)
+                "leader_bid": opp["leader_bid"],        # signal strength
                 "contracts": contracts,
-                "edge_estimate_pp": opp["edge_estimate_pp"],
-                "edge_cents": opp["edge_cents"],
                 "depth": opp["depth"],
-                "order_time": datetime.now().isoformat(),
+                "order_time": datetime.now(timezone.utc).isoformat(),  # UTC for correct fill time comparison
                 "close_time": close_time,
                 "elapsed_at_entry": opp["elapsed_s"],
                 "status": "pending",
@@ -338,7 +337,7 @@ class MakerExecutor:
 
             if bayesian_signal:
                 mode_tag = "BAYES" if BAYESIAN_ENABLED else "STATIC"
-                print(f"  [{mode_tag}] {ticker}: {opp['favorite_side'].upper()} @{opp['favorite_price']}c "
+                print(f"  [{mode_tag}] {ticker}: {opp['buy_side'].upper()} @{opp['buy_price']}c "
                       f"→ {contracts}ct | P(win)={bayesian_signal.posterior:.1%} "
                       f"Kelly={bayesian_signal.kelly_fraction:+.3f} "
                       f"EV={bayesian_signal.ev_per_contract_cents:+.1f}c")
@@ -394,13 +393,16 @@ class MakerExecutor:
         occurred at our hypothetical maker price (±tolerance). This simulates
         whether a resting limit order would have been matched.
 
-        Fill logic (corrected):
-        - favorite_side="no" at price Xc: we SELL YES at (100-X)c
+        Fill logic:
+        - buy_side="no" at price Xc: we BUY NO at Xc (≡ SELL YES at (100-X)c)
           → fill when taker_side=yes AND yes_price ≈ (100-X) ±tolerance
           → AND trade volume >= our order size
-        - favorite_side="yes" at price Xc: we BUY YES at Xc
+        - buy_side="yes" at price Xc: we BUY YES at Xc
           → fill when taker_side=no AND yes_price ≈ X ±tolerance
           → AND trade volume >= our order size
+
+        Time comparison: order_time is stored in UTC (fixed from local time bug).
+        Kalshi trade created_time is also UTC. Both are ISO 8601 strings.
         """
         if not self.pending_orders:
             return
@@ -443,13 +445,14 @@ class MakerExecutor:
                 continue
 
             # Check each trade for a fill match
-            favorite_side = order["favorite_side"]
-            favorite_price = order["favorite_price"]
+            buy_side = order.get("buy_side", order.get("favorite_side", ""))
+            buy_price = order.get("buy_price", order.get("favorite_price", 0))
             contracts = order["contracts"]
-            order_time_str = order["order_time"]
+            order_time_str = order["order_time"]  # UTC ISO string
 
             for trade in trades:
-                # Only count trades after our order was placed
+                # Only count trades AFTER our order was placed
+                # Both order_time and trade created_time are now UTC ISO strings
                 trade_time = trade.get("created_time", "")
                 if trade_time and trade_time < order_time_str:
                     continue
@@ -462,18 +465,18 @@ class MakerExecutor:
                 if trade_count < contracts:
                     continue
 
-                if favorite_side == "no":
-                    # We're selling YES at (100 - favorite_price)c
-                    # Fill ONLY when a taker BUYS YES at our ask price (±tolerance)
-                    our_yes_ask = 100 - favorite_price
+                if buy_side == "no":
+                    # We're buying NO at buy_price (≡ selling YES at 100-buy_price)
+                    # Fill when a taker BUYS YES at our ask price (±tolerance)
+                    our_yes_ask = 100 - buy_price
                     if taker_side == "yes" and abs(yes_price - our_yes_ask) <= FILL_TOLERANCE_CENTS:
                         filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
 
-                elif favorite_side == "yes":
-                    # We're buying YES at favorite_price
-                    # Fill ONLY when a taker SELLS YES into our bid (taker_side=no)
-                    if taker_side == "no" and abs(yes_price - favorite_price) <= FILL_TOLERANCE_CENTS:
+                elif buy_side == "yes":
+                    # We're buying YES at buy_price
+                    # Fill when a taker SELLS YES into our bid (taker_side=no)
+                    if taker_side == "no" and abs(yes_price - buy_price) <= FILL_TOLERANCE_CENTS:
                         filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
 
@@ -487,11 +490,12 @@ class MakerExecutor:
             order["fill_yes_price"] = fill_yes_price
             order["fill_volume"] = fill_count
             order["fill_taker_side"] = fill_taker_side
-            order_placed = datetime.fromisoformat(order["order_time"])
+
+            # Compute time-to-fill (both times are UTC now)
             try:
+                order_placed = datetime.fromisoformat(order["order_time"].replace("Z", "+00:00"))
                 ft = fill_time.replace("Z", "+00:00") if fill_time else ""
-                fill_dt = datetime.fromisoformat(ft) if ft else now
-                fill_dt = fill_dt.replace(tzinfo=None)
+                fill_dt = datetime.fromisoformat(ft) if ft else datetime.now(timezone.utc)
                 order["time_to_fill_s"] = round((fill_dt - order_placed).total_seconds())
             except Exception:
                 order["time_to_fill_s"] = 0
@@ -499,6 +503,8 @@ class MakerExecutor:
             self.filled_positions[ticker] = order
             self.fill_count += 1
 
+            buy_side = order.get("buy_side", order.get("favorite_side", ""))
+            buy_price = order.get("buy_price", order.get("favorite_price", 0))
             self._log_jsonl(OBS_LOG, {
                 "type": "order_filled",
                 "ts": datetime.now().isoformat(),
@@ -509,8 +515,8 @@ class MakerExecutor:
                 "fill_volume": fill_count,
                 "fill_taker_side": fill_taker_side,
                 "time_to_fill_s": order["time_to_fill_s"],
-                "favorite_side": order["favorite_side"],
-                "favorite_price": order["favorite_price"],
+                "buy_side": buy_side,
+                "buy_price": buy_price,
             })
 
         # Process expirations
@@ -520,13 +526,15 @@ class MakerExecutor:
             order["expired_time"] = now.isoformat()
             self.expire_count += 1
 
+            buy_side = order.get("buy_side", order.get("favorite_side", ""))
+            buy_price = order.get("buy_price", order.get("favorite_price", 0))
             self._log_jsonl(OBS_LOG, {
                 "type": "order_expired",
                 "ts": now.isoformat(),
                 "ticker": ticker,
                 "series": order.get("series", ""),
-                "favorite_side": order["favorite_side"],
-                "favorite_price": order["favorite_price"],
+                "buy_side": buy_side,
+                "buy_price": buy_price,
                 "elapsed_at_expiry": compute_elapsed(order.get("close_time", "")),
             })
 
@@ -553,17 +561,17 @@ class MakerExecutor:
                 if result not in ("yes", "no"):
                     continue
 
-                # Compute hypothetical P&L
-                favorite_side = pos["favorite_side"]
-                favorite_price = pos["favorite_price"]
+                # Compute hypothetical P&L (supports both old and new field names)
+                buy_side = pos.get("buy_side", pos.get("favorite_side", ""))
+                buy_price = pos.get("buy_price", pos.get("favorite_price", 0))
                 contracts = pos["contracts"]
-                fee = calculate_maker_fee(contracts, favorite_price)
+                fee = calculate_maker_fee(contracts, buy_price)
 
-                if favorite_side == result:
-                    pnl = (100 - favorite_price) * contracts - fee
+                if buy_side == result:
+                    pnl = (100 - buy_price) * contracts - fee
                     won = True
                 else:
-                    pnl = -(favorite_price * contracts) - fee
+                    pnl = -(buy_price * contracts) - fee
                     won = False
 
                 # Archive
@@ -648,7 +656,7 @@ class MakerExecutor:
         total_settled = history_wins + history_losses
 
         print(f"\n{'=' * 55}")
-        print(f"  15-MIN CRYPTO MAKER OBSERVER")
+        print(f"  15-MIN CRYPTO MAKER MOMENTUM OBSERVER")
         print(f"  Runtime: {elapsed:.1f}hrs | Scans: {self.scan_count}")
         print(f"  ---")
         print(f"  Orders: {len(self.pending_orders)} pending, "

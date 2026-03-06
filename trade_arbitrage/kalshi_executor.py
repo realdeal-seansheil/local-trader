@@ -235,6 +235,28 @@ class KalshiClient:
         resp.raise_for_status()
         return resp.json()
 
+    def get_order(self, order_id: str) -> dict:
+        """Get order status by order_id."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        headers = self.auth.get_headers("GET", path)
+        resp = requests.get(BASE_URL.rsplit("/trade-api/v2", 1)[0] + path,
+                            headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel a resting order."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        headers = self.auth.get_headers("DELETE", path)
+        resp = requests.delete(BASE_URL.rsplit("/trade-api/v2", 1)[0] + path,
+                               headers=headers, timeout=15)
+        if resp.status_code in (200, 204):
+            try:
+                return resp.json()
+            except Exception:
+                return {"cancelled": True}
+        return {"error": resp.status_code, "detail": resp.text}
+
     def place_order(self, ticker: str, side: str, action: str,
                     count: int, price: int, order_type: str = "limit") -> dict:
         """

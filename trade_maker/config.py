@@ -6,7 +6,7 @@ Tests whether taker's 93% WR momentum signal works with 4x lower maker fees.
 """
 
 # === Observation mode ===
-OBSERVATION_MODE = True  # Log only, no orders placed
+OBSERVATION_MODE = False  # *** LIVE TRADING — maker fees, momentum signal ***
 
 # === Crypto series (same as momentum bot) ===
 CRYPTO_SERIES = [

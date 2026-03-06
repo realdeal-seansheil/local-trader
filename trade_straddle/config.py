@@ -51,7 +51,7 @@ EXIT_BEFORE_CLOSE_SECONDS = 60   # Exit all positions 60s before market close
 # ============================================================
 MAX_DAILY_STRADDLES = 5          # Max 5 straddle entries per day
 MAX_DAILY_EXPOSURE_CENTS = 1000  # $10 hard cap (shared balance ~$53)
-OBSERVATION_MODE = False         # *** LIVE TRADING ***
+OBSERVATION_MODE = True          # Paused — WR below breakeven, switching to maker
 
 # ============================================================
 # TIMING

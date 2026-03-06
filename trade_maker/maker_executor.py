@@ -174,9 +174,10 @@ class MakerExecutor:
 
     def run_continuous(self):
         """Main observation loop."""
+        mode_str = "*** LIVE TRADING ***" if not OBSERVATION_MODE else "OBSERVATION ONLY (no orders placed)"
         print("\n" + "=" * 60)
-        print("  MAKER OBSERVER — 15-Min Crypto MOMENTUM (mirrors taker)")
-        print("  Mode: OBSERVATION ONLY (no orders placed)")
+        print("  MAKER BOT — 15-Min Crypto MOMENTUM (mirrors taker)")
+        print(f"  Mode: {mode_str}")
         print(f"  Series: {', '.join(CRYPTO_SERIES)}")
         print(f"  Entry window: T={MAKER_ENTRY_SECONDS}s ±{MAKER_ENTRY_WINDOW // 2}s")
         print(f"  Fill deadline: T={MAKER_DEADLINE_SECONDS}s")
@@ -329,12 +330,36 @@ class MakerExecutor:
                 "last_trade_check": None,
             }
 
+            # Place real order if live mode
+            if not OBSERVATION_MODE:
+                try:
+                    result = self.client.place_order(
+                        ticker=ticker,
+                        side=opp["buy_side"],
+                        action="buy",
+                        count=contracts,
+                        price=opp["buy_price"],  # bid price — rests on book as maker
+                    )
+                    if "error" in result:
+                        print(f"  ORDER ERROR: {ticker} {result}")
+                        continue
+                    order_id = result.get("order", {}).get("order_id", "")
+                    order["order_id"] = order_id
+                    order["live"] = True
+                except Exception as e:
+                    print(f"  ORDER FAILED: {ticker} {e}")
+                    continue
+
             self.pending_orders[ticker] = order
             self._entered_windows.add(window_key)
             current_exposure += position_cost
             total_tracked += 1
             new_count += 1
 
+            if not OBSERVATION_MODE and order.get("order_id"):
+                print(f"  LIVE ORDER: {ticker} {opp['buy_side'].upper()} "
+                      f"@{opp['buy_price']}c x{contracts} | "
+                      f"order_id={order['order_id'][:8]}...")
             if bayesian_signal:
                 mode_tag = "BAYES" if BAYESIAN_ENABLED else "STATIC"
                 print(f"  [{mode_tag}] {ticker}: {opp['buy_side'].upper()} @{opp['buy_price']}c "
@@ -387,22 +412,10 @@ class MakerExecutor:
 
     def _check_fills(self):
         """
-        Check if any pending orders would have been filled.
+        Check if any pending orders have been filled.
 
-        For each pending order, fetch recent trades and check if any trade
-        occurred at our hypothetical maker price (±tolerance). This simulates
-        whether a resting limit order would have been matched.
-
-        Fill logic:
-        - buy_side="no" at price Xc: we BUY NO at Xc (≡ SELL YES at (100-X)c)
-          → fill when taker_side=yes AND yes_price ≈ (100-X) ±tolerance
-          → AND trade volume >= our order size
-        - buy_side="yes" at price Xc: we BUY YES at Xc
-          → fill when taker_side=no AND yes_price ≈ X ±tolerance
-          → AND trade volume >= our order size
-
-        Time comparison: order_time is stored in UTC (fixed from local time bug).
-        Kalshi trade created_time is also UTC. Both are ISO 8601 strings.
+        LIVE mode: check real order status via Kalshi API.
+        OBSERVATION mode: simulate fills by scanning recent trades.
         """
         if not self.pending_orders:
             return
@@ -434,7 +447,22 @@ class MakerExecutor:
                 except Exception:
                     pass
 
-            # Fetch recent trades
+            # ── LIVE: Check real order status ──
+            if order.get("live") and order.get("order_id"):
+                try:
+                    order_data = self.client.get_order(order["order_id"])
+                    status = order_data.get("order", {}).get("status", "")
+                    if status in ("executed", "filled"):
+                        fill_time = datetime.now(timezone.utc).isoformat()
+                        buy_price = order.get("buy_price", 0)
+                        filled.append((ticker, fill_time, buy_price, order["contracts"], "live_fill"))
+                    # If still resting, continue waiting
+                except Exception:
+                    pass
+                time.sleep(0.1)
+                continue
+
+            # ── OBSERVATION: Simulate fills from trades API ──
             try:
                 trades_data = self.client.get_trades(ticker=ticker, limit=50)
                 trades = trades_data.get("trades", [])
@@ -444,15 +472,12 @@ class MakerExecutor:
             if not trades:
                 continue
 
-            # Check each trade for a fill match
             buy_side = order.get("buy_side", order.get("favorite_side", ""))
             buy_price = order.get("buy_price", order.get("favorite_price", 0))
             contracts = order["contracts"]
-            order_time_str = order["order_time"]  # UTC ISO string
+            order_time_str = order["order_time"]
 
             for trade in trades:
-                # Only count trades AFTER our order was placed
-                # Both order_time and trade created_time are now UTC ISO strings
                 trade_time = trade.get("created_time", "")
                 if trade_time and trade_time < order_time_str:
                     continue
@@ -461,26 +486,21 @@ class MakerExecutor:
                 taker_side = trade.get("taker_side", "")
                 trade_count = trade.get("count", 0)
 
-                # Volume check: trade must have enough contracts to fill our order
                 if trade_count < contracts:
                     continue
 
                 if buy_side == "no":
-                    # We're buying NO at buy_price (≡ selling YES at 100-buy_price)
-                    # Fill when a taker BUYS YES at our ask price (±tolerance)
                     our_yes_ask = 100 - buy_price
                     if taker_side == "yes" and abs(yes_price - our_yes_ask) <= FILL_TOLERANCE_CENTS:
                         filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
 
                 elif buy_side == "yes":
-                    # We're buying YES at buy_price
-                    # Fill when a taker SELLS YES into our bid (taker_side=no)
                     if taker_side == "no" and abs(yes_price - buy_price) <= FILL_TOLERANCE_CENTS:
                         filled.append((ticker, trade_time, yes_price, trade_count, taker_side))
                         break
 
-            time.sleep(0.1)  # Rate limit trade lookups
+            time.sleep(0.1)
 
         # Process fills
         for ticker, fill_time, fill_yes_price, fill_count, fill_taker_side in filled:
@@ -519,9 +539,17 @@ class MakerExecutor:
                 "buy_price": buy_price,
             })
 
-        # Process expirations
+        # Process expirations (cancel real orders if live)
         for ticker in expired:
             order = self.pending_orders.pop(ticker)
+
+            if order.get("live") and order.get("order_id"):
+                try:
+                    self.client.cancel_order(order["order_id"])
+                    print(f"  CANCELLED: {ticker} (deadline reached)")
+                except Exception as e:
+                    print(f"  Cancel failed {ticker}: {e}")
+
             order["status"] = "expired"
             order["expired_time"] = now.isoformat()
             self.expire_count += 1
@@ -656,7 +684,8 @@ class MakerExecutor:
         total_settled = history_wins + history_losses
 
         print(f"\n{'=' * 55}")
-        print(f"  15-MIN CRYPTO MAKER MOMENTUM OBSERVER")
+        mode_tag = "LIVE" if not OBSERVATION_MODE else "OBSERVER"
+        print(f"  15-MIN CRYPTO MAKER MOMENTUM {mode_tag}")
         print(f"  Runtime: {elapsed:.1f}hrs | Scans: {self.scan_count}")
         print(f"  ---")
         print(f"  Orders: {len(self.pending_orders)} pending, "

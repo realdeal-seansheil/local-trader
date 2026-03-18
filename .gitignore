@@ -20,6 +20,8 @@ files/data/
 trade_arbitrage/data/
 trade_arbitrage/analysis/
 trade_straddle/data/
+trade_underdog/data/
+trade_maker/data/
 
 # macOS
 .DS_Store

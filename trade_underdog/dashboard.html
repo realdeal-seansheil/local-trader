@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Underdog Bot — P&L Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'SF Mono', 'Fira Code', monospace; }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 16px 24px; border-bottom: 1px solid #1a1a2e;
+  }
+  .header h1 { font-size: 18px; color: #fff; }
+  .header .status { font-size: 13px; color: #666; }
+  .header .status.live { color: #00c853; }
+
+  .controls {
+    display: flex; gap: 8px; padding: 12px 24px; border-bottom: 1px solid #1a1a2e;
+    flex-wrap: wrap; align-items: center;
+  }
+  .controls button {
+    background: #1a1a2e; color: #aaa; border: 1px solid #2a2a3e;
+    padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px;
+    font-family: inherit; transition: all 0.2s;
+  }
+  .controls button:hover { background: #2a2a3e; color: #fff; }
+  .controls button.active { background: #1a3a1a; color: #00c853; border-color: #00c853; }
+  .controls .sep { width: 1px; height: 24px; background: #2a2a3e; }
+  .controls label { font-size: 12px; color: #666; margin-left: 8px; }
+
+  .stats-bar {
+    display: flex; gap: 24px; padding: 14px 24px;
+    border-bottom: 1px solid #1a1a2e; flex-wrap: wrap;
+  }
+  .stat {
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .stat .label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat .value { font-size: 16px; font-weight: 600; }
+  .stat .value.positive { color: #00c853; }
+  .stat .value.negative { color: #ff1744; }
+  .stat .value.neutral { color: #aaa; }
+
+  #chart-container { width: 100%; height: 420px; padding: 0 24px; }
+
+  .tables { display: flex; gap: 16px; padding: 16px 24px; flex-wrap: wrap; }
+  .table-wrap { flex: 1; min-width: 400px; }
+  .table-wrap h3 {
+    font-size: 13px; color: #666; margin-bottom: 8px;
+    text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: #555; padding: 6px 8px; border-bottom: 1px solid #1a1a2e; font-weight: 500; }
+  td { padding: 5px 8px; border-bottom: 1px solid #0f0f1a; }
+  tr:hover td { background: #0f0f1a; }
+  .win { color: #00c853; }
+  .loss { color: #ff1744; }
+  .tag {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 600;
+  }
+  .tag.early { background: #1a2a3a; color: #4fc3f7; }
+  .tag.fade { background: #2a1a3a; color: #ce93d8; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>UNDERDOG BOT</h1>
+  <div class="status" id="status">Loading...</div>
+</div>
+
+<div class="controls">
+  <button class="active" data-filter="all">All</button>
+  <button data-filter="early_window">Early Window</button>
+  <button data-filter="fade_extreme">Fade Extreme</button>
+  <div class="sep"></div>
+  <button class="active" data-view="cumulative">Cumulative P&L</button>
+  <button data-view="pertrade">Per Trade</button>
+  <div class="sep"></div>
+  <label>Auto-refresh:
+    <select id="refresh-interval" style="background:#1a1a2e;color:#aaa;border:1px solid #2a2a3e;padding:3px 6px;font-family:inherit;font-size:12px;border-radius:3px;">
+      <option value="0">Off</option>
+      <option value="10" selected>10s</option>
+      <option value="30">30s</option>
+      <option value="60">60s</option>
+    </select>
+  </label>
+  <button id="refresh-btn" style="margin-left:auto;">&#8635; Refresh Now</button>
+</div>
+
+<div class="stats-bar" id="stats-bar"></div>
+
+<div id="chart-container"></div>
+
+<div class="tables">
+  <div class="table-wrap">
+    <h3>Recent Settlements</h3>
+    <table id="recent-table">
+      <thead><tr><th>Time</th><th>Ticker</th><th>Strategy</th><th>Side</th><th>Price</th><th>Result</th><th>P&L</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="table-wrap">
+    <h3>Strategy Breakdown</h3>
+    <table id="strategy-table">
+      <thead><tr><th>Strategy</th><th>Trades</th><th>Win Rate</th><th>Avg P&L</th><th>Total P&L</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const DATA_URL = './data/underdog_history.jsonl';
+
+let allTrades = [];
+let currentFilter = 'all';
+let currentView = 'cumulative';
+let chart, mainSeries;
+let refreshTimer = null;
+
+// Chart setup
+function initChart() {
+  const container = document.getElementById('chart-container');
+  chart = LightweightCharts.createChart(container, {
+    layout: { background: { color: '#0a0a0f' }, textColor: '#666', fontFamily: "'SF Mono', monospace", fontSize: 11 },
+    grid: { vertLines: { color: '#111118' }, horzLines: { color: '#111118' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#1a1a2e' },
+    timeScale: { borderColor: '#1a1a2e', timeVisible: true, secondsVisible: false },
+    handleScroll: true,
+    handleScale: true,
+  });
+  // Start with line series for cumulative
+  mainSeries = chart.addLineSeries({
+    color: '#00c853',
+    lineWidth: 2,
+    priceFormat: { type: 'custom', formatter: v => (v >= 0 ? '+' : '') + v.toFixed(0) + 'c' },
+  });
+
+  new ResizeObserver(() => {
+    chart.applyOptions({ width: container.clientWidth, height: 420 });
+  }).observe(container);
+}
+
+async function loadData() {
+  try {
+    const resp = await fetch(DATA_URL + '?t=' + Date.now());
+    const text = await resp.text();
+    allTrades = text.trim().split('\n').filter(Boolean).map(line => {
+      try { return JSON.parse(line); } catch { return null; }
+    }).filter(Boolean);
+
+    // Sort by settled_time
+    allTrades.sort((a, b) => (a.settled_time || '').localeCompare(b.settled_time || ''));
+
+    updateAll();
+    document.getElementById('status').textContent = `${allTrades.length} trades loaded — ${new Date().toLocaleTimeString()}`;
+    document.getElementById('status').className = 'status live';
+  } catch (e) {
+    document.getElementById('status').textContent = 'Error loading data: ' + e.message;
+    document.getElementById('status').className = 'status';
+  }
+}
+
+function getFiltered() {
+  if (currentFilter === 'all') return allTrades;
+  return allTrades.filter(t => t.strategy === currentFilter);
+}
+
+function updateAll() {
+  const trades = getFiltered();
+  updateStats(trades);
+  updateChart(trades);
+  updateRecentTable(trades);
+  updateStrategyTable();
+}
+
+function updateStats(trades) {
+  const totalPnl = trades.reduce((s, t) => s + (t.pnl_cents || 0), 0);
+  const wins = trades.filter(t => t.won).length;
+  const losses = trades.length - wins;
+  const winRate = trades.length > 0 ? (wins / trades.length * 100) : 0;
+  const avgPnl = trades.length > 0 ? totalPnl / trades.length : 0;
+  const totalFees = trades.reduce((s, t) => s + (t.fee_cents || 0), 0);
+
+  // Best/worst streak
+  let bestStreak = 0, worstStreak = 0, cs = 0;
+  for (const t of trades) {
+    if (t.won) { cs = Math.max(cs + 1, 1); bestStreak = Math.max(bestStreak, cs); }
+    else { cs = Math.min(cs - 1, -1); worstStreak = Math.min(worstStreak, cs); }
+  }
+
+  const bar = document.getElementById('stats-bar');
+  bar.innerHTML = [
+    stat('Total P&L', fmt(totalPnl) + 'c', totalPnl),
+    stat('Dollar P&L', '$' + (totalPnl / 100).toFixed(2), totalPnl),
+    stat('Trades', trades.length, null),
+    stat('Win Rate', winRate.toFixed(1) + '%', winRate > 55 ? 1 : winRate < 45 ? -1 : 0),
+    stat('Record', `${wins}W / ${losses}L`, null),
+    stat('Avg P&L', fmt(avgPnl) + 'c', avgPnl),
+    stat('Fees Paid', totalFees + 'c', -1),
+    stat('Best Streak', bestStreak + 'W', bestStreak > 0 ? 1 : 0),
+    stat('Worst Streak', Math.abs(worstStreak) + 'L', worstStreak < 0 ? -1 : 0),
+  ].join('');
+}
+
+function stat(label, value, sentiment) {
+  const cls = sentiment === null ? 'neutral' : sentiment > 0 ? 'positive' : sentiment < 0 ? 'negative' : 'neutral';
+  return `<div class="stat"><span class="label">${label}</span><span class="value ${cls}">${value}</span></div>`;
+}
+
+function fmt(v) { return (v >= 0 ? '+' : '') + Math.round(v); }
+
+function updateChart(trades) {
+  if (!trades.length) { mainSeries.setData([]); return; }
+
+  if (currentView === 'cumulative') {
+    // Switch to line series
+    chart.removeSeries(mainSeries);
+    mainSeries = chart.addLineSeries({
+      color: '#00c853', lineWidth: 2,
+      priceFormat: { type: 'custom', formatter: v => (v >= 0 ? '+' : '') + v.toFixed(0) + 'c' },
+    });
+
+    let cumPnl = 0;
+    const data = trades.map(t => {
+      cumPnl += (t.pnl_cents || 0);
+      const ts = Math.floor(new Date(t.settled_time).getTime() / 1000);
+      return { time: ts, value: cumPnl };
+    });
+
+    // Dedup timestamps (lightweight-charts requires unique times)
+    const deduped = [];
+    for (const d of data) {
+      if (deduped.length && deduped[deduped.length - 1].time >= d.time) {
+        d.time = deduped[deduped.length - 1].time + 1;
+      }
+      deduped.push(d);
+    }
+
+    mainSeries.setData(deduped);
+
+    // Color based on final P&L
+    mainSeries.applyOptions({ color: cumPnl >= 0 ? '#00c853' : '#ff1744' });
+
+    // Add zero line
+    mainSeries.createPriceLine({ price: 0, color: '#333', lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
+
+  } else {
+    // Per-trade candlestick-style bars
+    chart.removeSeries(mainSeries);
+    mainSeries = chart.addHistogramSeries({
+      priceFormat: { type: 'custom', formatter: v => (v >= 0 ? '+' : '') + v.toFixed(0) + 'c' },
+    });
+
+    const data = trades.map(t => {
+      const ts = Math.floor(new Date(t.settled_time).getTime() / 1000);
+      const pnl = t.pnl_cents || 0;
+      return { time: ts, value: pnl, color: pnl >= 0 ? '#00c853' : '#ff1744' };
+    });
+
+    // Dedup
+    const deduped = [];
+    for (const d of data) {
+      if (deduped.length && deduped[deduped.length - 1].time >= d.time) {
+        d.time = deduped[deduped.length - 1].time + 1;
+      }
+      deduped.push(d);
+    }
+
+    mainSeries.setData(deduped);
+  }
+
+  chart.timeScale().fitContent();
+}
+
+function updateRecentTable(trades) {
+  const tbody = document.querySelector('#recent-table tbody');
+  const recent = trades.slice(-25).reverse();
+  tbody.innerHTML = recent.map(t => {
+    const time = new Date(t.settled_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const shortTicker = t.ticker.replace(/KXBTC15M-|KXETH15M-|KXSOL15M-|KXXRP15M-/g, '').slice(0, 15);
+    const series = (t.series || '').replace('15M', '').replace('KX', '');
+    const strat = t.strategy === 'early_window' ? '<span class="tag early">EARLY</span>' : '<span class="tag fade">FADE</span>';
+    const pnl = t.pnl_cents || 0;
+    const cls = t.won ? 'win' : 'loss';
+    return `<tr>
+      <td>${time}</td>
+      <td>${series} ${shortTicker}</td>
+      <td>${strat}</td>
+      <td>${(t.buy_side || '').toUpperCase()}</td>
+      <td>${t.buy_price}c</td>
+      <td class="${cls}">${t.won ? 'WIN' : 'LOSS'}</td>
+      <td class="${cls}">${pnl >= 0 ? '+' : ''}${pnl}c</td>
+    </tr>`;
+  }).join('');
+}
+
+function updateStrategyTable() {
+  const strategies = ['early_window', 'fade_extreme'];
+  const tbody = document.querySelector('#strategy-table tbody');
+  let rows = '';
+
+  for (const strat of strategies) {
+    const trades = allTrades.filter(t => t.strategy === strat);
+    if (!trades.length) continue;
+    const wins = trades.filter(t => t.won).length;
+    const totalPnl = trades.reduce((s, t) => s + (t.pnl_cents || 0), 0);
+    const avgPnl = totalPnl / trades.length;
+    const wr = (wins / trades.length * 100).toFixed(1);
+    const label = strat === 'early_window' ? '<span class="tag early">EARLY</span>' : '<span class="tag fade">FADE</span>';
+    const pnlCls = totalPnl >= 0 ? 'win' : 'loss';
+
+    rows += `<tr>
+      <td>${label}</td>
+      <td>${trades.length}</td>
+      <td>${wr}% (${wins}W/${trades.length - wins}L)</td>
+      <td class="${avgPnl >= 0 ? 'win' : 'loss'}">${fmt(avgPnl)}c</td>
+      <td class="${pnlCls}">${fmt(totalPnl)}c ($${(totalPnl / 100).toFixed(2)})</td>
+    </tr>`;
+
+    // Price bucket breakdown
+    const buckets = [[52, 60, '52-60c'], [61, 70, '61-70c'], [71, 80, '71-80c'], [81, 100, '81-100c'], [1, 25, '1-25c']];
+    for (const [lo, hi, label2] of buckets) {
+      const bt = trades.filter(t => t.buy_price >= lo && t.buy_price <= hi);
+      if (!bt.length) continue;
+      const bw = bt.filter(t => t.won).length;
+      const bp = bt.reduce((s, t) => s + (t.pnl_cents || 0), 0);
+      const bCls = bp >= 0 ? 'win' : 'loss';
+      rows += `<tr>
+        <td style="padding-left:24px;color:#555;">${label2}</td>
+        <td>${bt.length}</td>
+        <td>${(bw / bt.length * 100).toFixed(0)}%</td>
+        <td class="${bp / bt.length >= 0 ? 'win' : 'loss'}">${fmt(bp / bt.length)}c</td>
+        <td class="${bCls}">${fmt(bp)}c</td>
+      </tr>`;
+    }
+  }
+  tbody.innerHTML = rows;
+}
+
+// Controls
+document.querySelectorAll('.controls button[data-filter]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.controls button[data-filter]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    updateAll();
+  });
+});
+
+document.querySelectorAll('.controls button[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.controls button[data-view]').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentView = btn.dataset.view;
+    updateAll();
+  });
+});
+
+document.getElementById('refresh-btn').addEventListener('click', loadData);
+
+document.getElementById('refresh-interval').addEventListener('change', (e) => {
+  if (refreshTimer) clearInterval(refreshTimer);
+  const sec = parseInt(e.target.value);
+  if (sec > 0) refreshTimer = setInterval(loadData, sec * 1000);
+});
+
+// Init
+initChart();
+loadData();
+
+// Start auto-refresh (default 10s)
+refreshTimer = setInterval(loadData, 10000);
+</script>
+</body>
+</html>

@@ -93,8 +93,8 @@ CROSS_SERIES_MIN_AGREEMENT = 3      # require 3/4 series to agree
 TRADE_TAPE_ENABLED = True
 
 # ── ENRICHMENT: VOLATILITY REGIME ──
-VOL_LOW_THRESHOLD = 1.0             # % — below this = low_vol (skip early)
-VOL_HIGH_THRESHOLD = 2.5            # % — above this = high_vol (skip fade)
+VOL_LOW_THRESHOLD = 0.02            # % — below this = low_vol (skip early). 15-min crypto avg ~0.15%
+VOL_HIGH_THRESHOLD = 0.5            # % — above this = high_vol (skip fade). 15-min crypto rarely exceeds 0.44%
 
 # ── PASSIVE TICK LOGGING ──
 TICK_LOGGING_ENABLED = True          # Full T=0-to-T=900 tick collection

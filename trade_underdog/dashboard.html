@@ -219,51 +219,73 @@ function updateChart(trades) {
   if (!trades.length) { mainSeries.setData([]); return; }
 
   if (currentView === 'cumulative') {
-    // Switch to line series
+    // Candlestick: each candle = 15-min bucket of cumulative P&L
     chart.removeSeries(mainSeries);
-    mainSeries = chart.addLineSeries({
-      color: '#00c853', lineWidth: 2,
+    mainSeries = chart.addCandlestickSeries({
+      upColor: '#00c853', downColor: '#ff1744',
+      borderUpColor: '#00c853', borderDownColor: '#ff1744',
+      wickUpColor: '#00c85388', wickDownColor: '#ff174488',
       priceFormat: { type: 'custom', formatter: v => (v >= 0 ? '+' : '') + v.toFixed(0) + 'c' },
     });
 
+    // Build cumulative P&L series, then bucket into 15-min candles
+    const BUCKET_S = 15 * 60; // 15-min candles
     let cumPnl = 0;
-    const data = trades.map(t => {
+    const cumPoints = trades.map(t => {
       cumPnl += (t.pnl_cents || 0);
-      const ts = Math.floor(new Date(t.settled_time).getTime() / 1000);
-      return { time: ts, value: cumPnl };
+      return { ts: Math.floor(new Date(t.settled_time).getTime() / 1000), cum: cumPnl };
     });
 
-    // Dedup timestamps (lightweight-charts requires unique times)
-    const deduped = [];
-    for (const d of data) {
-      if (deduped.length && deduped[deduped.length - 1].time >= d.time) {
-        d.time = deduped[deduped.length - 1].time + 1;
-      }
-      deduped.push(d);
+    // Group into buckets
+    const buckets = new Map(); // bucketStart -> [cum values]
+    for (const p of cumPoints) {
+      const bStart = Math.floor(p.ts / BUCKET_S) * BUCKET_S;
+      if (!buckets.has(bStart)) buckets.set(bStart, []);
+      buckets.get(bStart).push(p.cum);
     }
 
-    mainSeries.setData(deduped);
+    // Build candle data
+    let prevClose = 0;
+    const candles = [];
+    const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+    for (const bStart of sortedKeys) {
+      const vals = buckets.get(bStart);
+      const open = prevClose;
+      const close = vals[vals.length - 1];
+      const high = Math.max(open, ...vals);
+      const low = Math.min(open, ...vals);
+      candles.push({ time: bStart, open, high, low, close });
+      prevClose = close;
+    }
 
-    // Color based on final P&L
-    mainSeries.applyOptions({ color: cumPnl >= 0 ? '#00c853' : '#ff1744' });
+    mainSeries.setData(candles);
 
-    // Add zero line
+    // Zero line
     mainSeries.createPriceLine({ price: 0, color: '#333', lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
 
   } else {
-    // Per-trade candlestick-style bars
+    // Per-trade: each trade is its own candle (open=0, close=pnl)
     chart.removeSeries(mainSeries);
-    mainSeries = chart.addHistogramSeries({
+    mainSeries = chart.addCandlestickSeries({
+      upColor: '#00c853', downColor: '#ff1744',
+      borderUpColor: '#00c853', borderDownColor: '#ff1744',
+      wickUpColor: '#00c85388', wickDownColor: '#ff174488',
       priceFormat: { type: 'custom', formatter: v => (v >= 0 ? '+' : '') + v.toFixed(0) + 'c' },
     });
 
     const data = trades.map(t => {
       const ts = Math.floor(new Date(t.settled_time).getTime() / 1000);
       const pnl = t.pnl_cents || 0;
-      return { time: ts, value: pnl, color: pnl >= 0 ? '#00c853' : '#ff1744' };
+      return {
+        time: ts,
+        open: 0,
+        close: pnl,
+        high: Math.max(0, pnl),
+        low: Math.min(0, pnl),
+      };
     });
 
-    // Dedup
+    // Dedup timestamps
     const deduped = [];
     for (const d of data) {
       if (deduped.length && deduped[deduped.length - 1].time >= d.time) {
@@ -273,6 +295,9 @@ function updateChart(trades) {
     }
 
     mainSeries.setData(deduped);
+
+    // Zero line
+    mainSeries.createPriceLine({ price: 0, color: '#333', lineWidth: 1, lineStyle: 2, axisLabelVisible: false });
   }
 
   chart.timeScale().fitContent();

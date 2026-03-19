@@ -78,8 +78,25 @@ OVERNIGHT_END_HOUR = 8              # 8:00 AM EST
 EARLY_OVERNIGHT_MIN_BID = 55        # Same as normal (no overnight restriction)
 FADE_OVERNIGHT_ENABLED = True       # Observe fade during all hours
 
-# ── PASSIVE TICK LOGGING ──
+# ── ENRICHMENT: SPOT FEED (Binance) ──
+SPOT_FEED_ENABLED = True
+BINANCE_BASE_URL = "https://api.binance.us/api/v3"
+SPOT_DIVERGENCE_THRESHOLD = 0.05     # % threshold for spot vs leader divergence
 
+# ── ENRICHMENT: OB MOMENTUM ──
+OB_MOMENTUM_WINDOW = 10             # snapshots (30s at 3s interval)
+
+# ── ENRICHMENT: CROSS SERIES ──
+CROSS_SERIES_MIN_AGREEMENT = 3      # require 3/4 series to agree
+
+# ── ENRICHMENT: TRADE TAPE ──
+TRADE_TAPE_ENABLED = True
+
+# ── ENRICHMENT: VOLATILITY REGIME ──
+VOL_LOW_THRESHOLD = 1.0             # % — below this = low_vol (skip early)
+VOL_HIGH_THRESHOLD = 2.5            # % — above this = high_vol (skip fade)
+
+# ── PASSIVE TICK LOGGING ──
 TICK_LOGGING_ENABLED = True          # Full T=0-to-T=900 tick collection
 
 # ── LOGGING ──

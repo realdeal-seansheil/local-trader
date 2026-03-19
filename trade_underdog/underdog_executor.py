@@ -55,6 +55,7 @@ from .config import (
 from .market_scanner import fetch_all_snapshots, compute_elapsed, is_skip_hour, is_overnight
 from .tick_logger import TickLogger
 from .signal_logger import SignalLogger
+from .enrichment_manager import EnrichmentManager
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -89,6 +90,7 @@ class UnderdogExecutor:
         # Sub-components
         self.tick_logger = TickLogger()
         self.signal_logger = SignalLogger()
+        self.enrichment = EnrichmentManager(client)
 
         self._load_state()
 
@@ -217,6 +219,19 @@ class UnderdogExecutor:
             if depth < EARLY_MIN_DEPTH:
                 continue
 
+            # ── Enrichment filters (graceful: skip filter if data missing) ──
+            vol = snap.get("vol_regime", {})
+            if vol.get("regime_action") == "skip_early":
+                continue  # Low vol — not enough movement for early entries
+
+            momentum = snap.get("momentum", {})
+            if momentum.get("bid_velocity", 0) < -1:
+                continue  # Leader bid dropping fast — skip
+
+            spot = snap.get("spot", {})
+            if spot.get("leader_divergent"):
+                continue  # Kalshi leader disagrees with spot movement — skip
+
             # Position sizing (fixed for now, future: Kelly)
             contracts = EARLY_MAX_CONTRACTS
 
@@ -265,7 +280,16 @@ class UnderdogExecutor:
                   f"@{buy_price}c x{contracts} | leader={leader_bid}c "
                   f"T={elapsed_s:.0f}s depth={depth}")
 
-            self._log_jsonl(OBS_LOG, {"type": "early_order", "ts": datetime.now().isoformat(), **order})
+            self._log_jsonl(OBS_LOG, {
+                "type": "early_order", "ts": datetime.now().isoformat(), **order,
+                "enrichment": {
+                    "spot": snap.get("spot", {}),
+                    "tape": snap.get("tape", {}),
+                    "momentum": snap.get("momentum", {}),
+                    "cross_series": snap.get("cross_series", {}),
+                    "vol_regime": snap.get("vol_regime", {}),
+                },
+            })
 
     # ── Strategy 4: Fade the Extreme ──
 
@@ -317,6 +341,19 @@ class UnderdogExecutor:
             if underdog_depth < FADE_MIN_DEPTH:
                 continue
 
+            # ── Enrichment filters (graceful: skip filter if data missing) ──
+            vol = snap.get("vol_regime", {})
+            if vol.get("regime_action") == "skip_fade":
+                continue  # High vol — momentum too strong, fades get crushed
+
+            tape = snap.get("tape", {})
+            if tape.get("acceleration", 0) > 5:
+                continue  # Volume accelerating toward favorite — don't fade
+
+            momentum = snap.get("momentum", {})
+            if momentum.get("bid_velocity", 0) > 2:
+                continue  # Favorite bid still climbing fast — too early to fade
+
             # Position sizing
             contracts = FADE_MAX_CONTRACTS
 
@@ -365,7 +402,16 @@ class UnderdogExecutor:
                   f"@{underdog_bid}c x{contracts} | fav={favorite_bid}c "
                   f"T={elapsed_s:.0f}s depth={underdog_depth}")
 
-            self._log_jsonl(OBS_LOG, {"type": "fade_order", "ts": datetime.now().isoformat(), **order})
+            self._log_jsonl(OBS_LOG, {
+                "type": "fade_order", "ts": datetime.now().isoformat(), **order,
+                "enrichment": {
+                    "spot": snap.get("spot", {}),
+                    "tape": snap.get("tape", {}),
+                    "momentum": snap.get("momentum", {}),
+                    "cross_series": snap.get("cross_series", {}),
+                    "vol_regime": snap.get("vol_regime", {}),
+                },
+            })
 
     # ── Fill Detection ──
 
@@ -421,12 +467,16 @@ class UnderdogExecutor:
                 time.sleep(0.1)
                 continue
 
-            # ── OBS: Simulate fills from trades API ──
-            try:
-                trades_data = self.client.get_trades(ticker=ticker, limit=50)
-                trades = trades_data.get("trades", [])
-            except Exception:
-                continue
+            # ── OBS: Simulate fills from trades API (try enrichment cache first) ──
+            cached = self.enrichment.get_trade_cache(ticker)
+            if cached is not None:
+                trades = cached
+            else:
+                try:
+                    trades_data = self.client.get_trades(ticker=ticker, limit=50)
+                    trades = trades_data.get("trades", [])
+                except Exception:
+                    continue
 
             if not trades:
                 continue
@@ -750,6 +800,8 @@ class UnderdogExecutor:
         if total_settled > 0:
             print(f"  Per-trade avg: {self.total_pnl / total_settled:+.1f}c")
         print(f"  Exposure: ${self._current_exposure() / 100:.2f}")
+        enrich_ms = self.enrichment.get_enrich_latency_ms()
+        print(f"  Enrichment latency: {enrich_ms}ms")
         print(f"{'=' * 60}\n")
 
     # ── Main Loop ──
@@ -766,6 +818,7 @@ class UnderdogExecutor:
         print(f"  Fade extreme: T={FADE_ENTRY_START_S}-{FADE_ENTRY_END_S}s, "
               f"fav >= {FADE_EXTREME_THRESHOLD}c, dog <= {FADE_MAX_UNDERDOG_PRICE}c")
         print(f"  Skip hours: {sorted(SKIP_HOURS)}")
+        print(f"  Enrichment: spot_feed + ob_momentum + cross_series + trade_tape + vol_regime")
         print("=" * 60 + "\n")
 
         last_settlement_check = 0
@@ -782,6 +835,10 @@ class UnderdogExecutor:
                 # 1. Fetch all market snapshots (shared across all consumers)
                 snapshots = fetch_all_snapshots(self.client)
                 self.scan_count += 1
+
+                # 1b. Enrich snapshots with signal data (spot, momentum, cross, tape, vol)
+                if snapshots:
+                    snapshots = self.enrichment.enrich(snapshots)
 
                 # 2. Log passive ticks (T=0-900)
                 if TICK_LOGGING_ENABLED and snapshots:

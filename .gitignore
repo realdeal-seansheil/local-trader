@@ -22,6 +22,7 @@ trade_arbitrage/analysis/
 trade_straddle/data/
 trade_underdog/data/
 trade_maker/data/
+trade_fade/data/
 
 # macOS
 .DS_Store

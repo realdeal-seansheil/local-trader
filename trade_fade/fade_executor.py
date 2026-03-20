@@ -785,6 +785,7 @@ class FadeExecutor:
 
         last_settlement_check = 0
         last_print = 0
+        last_kelly_refresh = time.time()
 
         while True:
             try:
@@ -804,6 +805,11 @@ class FadeExecutor:
                 if now - last_settlement_check >= SETTLEMENT_CHECK_INTERVAL:
                     self._check_settlements()
                     last_settlement_check = now
+
+                # Refresh Kelly win rates every hour from underdog history
+                if now - last_kelly_refresh >= 3600:
+                    self._load_win_rates()
+                    last_kelly_refresh = now
 
                 if now - last_print >= PRINT_INTERVAL_SECONDS:
                     self._print_summary()

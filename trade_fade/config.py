@@ -1,9 +1,11 @@
 """
-Fade Bot Configuration — Enrichment-Gated High-Ratio Fades
+Kelly Bot Configuration — Underdog strategy clone with Kelly criterion sizing.
 
-Shadow strategy running alongside trade_underdog. Targets the 11-15c
-underdog sweet spot where win rate is ~50% and reward/risk is 9:1.
-Entry gates derived from backtest of 38 fade trades + 5,353 signal observations.
+Mirrors trade_underdog exactly (same strategies, same enrichment filters)
+but replaces fixed 3-contract sizing with Kelly-optimal position sizing
+based on historical win rates by price bucket.
+
+Starting balance: $100 (10,000c). Tracks virtual balance throughout.
 """
 
 import math as _math
@@ -16,36 +18,54 @@ DATA_DIR = str(_BASE / "data")
 _os.makedirs(DATA_DIR, exist_ok=True)
 
 # === Observation mode ===
-OBSERVATION_MODE = True  # Paper trading — virtual fills via trades API
+OBSERVATION_MODE = True
 
 # === Crypto series ===
 CRYPTO_SERIES = [
-    "KXBTC15M",   # Bitcoin 15-min
-    "KXETH15M",   # Ethereum 15-min
-    "KXSOL15M",   # Solana 15-min
-    "KXXRP15M",   # XRP 15-min
+    "KXBTC15M",
+    "KXETH15M",
+    "KXSOL15M",
+    "KXXRP15M",
 ]
 
 # === Loop timing ===
 LOOP_INTERVAL_SECONDS = 3
 MAKER_FEE_COEFFICIENT = 0.0175
 
-# ── FADE STRATEGY: Core Thresholds ──
-FADE_ENTRY_START_S = 300           # T=5min (not too early)
-FADE_ENTRY_END_S = 750             # T=12.5min (not too late — base rate drops after T=600)
-FADE_MIN_FAVORITE_BID = 80        # Favorite must be >= 80c
-FADE_MIN_UNDERDOG_PRICE = 11      # Sweet spot floor: backtest shows <11c = 0-11% win rate
-FADE_MAX_UNDERDOG_PRICE = 15      # Sweet spot ceiling: backtest shows 11-15c = 50% win rate
-FADE_MIN_DEPTH = 3                # Minimum orderbook depth
-FADE_MAX_CONTRACTS = 2            # Position size
-FADE_FILL_DEADLINE_S = 870        # Cancel unfilled at T=14.5min
+# ── STRATEGY 2: EARLY WINDOW (mirrored from underdog) ──
+EARLY_ENABLED = True
+EARLY_ENTRY_START_S = 180
+EARLY_ENTRY_END_S = 600
+EARLY_MIN_LEADER_BID = 52
+EARLY_MAX_LEADER_BID = 80
+EARLY_MIN_DEPTH = 3
+EARLY_FILL_DEADLINE_S = 840
 
-# ── ENRICHMENT SIGNAL GATES (derived from backtest) ──
-# All 4 fade wins shared: negative tape acceleration, low velocity, non-unanimous cross-series
-GATE_MAX_TAPE_ACCELERATION = 0     # Tape must be decelerating (≤ 0)
-GATE_MAX_VELOCITY_30S = 15         # Low recent trading activity (wins had vel30 2-12)
-GATE_MAX_CROSS_AGREEMENT = 3      # Move not unanimous (wins had 2-3, losses had 4)
-GATE_MAX_BID_VELOCITY = 0.2       # Favorite bid not still climbing (wins had 0-0.18)
+# ── STRATEGY 4: FADE THE EXTREME (mirrored from underdog) ──
+FADE_ENABLED = True
+FADE_ENTRY_START_S = 300
+FADE_ENTRY_END_S = 870
+FADE_EXTREME_THRESHOLD = 80
+FADE_MAX_UNDERDOG_PRICE = 25
+FADE_MIN_DEPTH = 3
+FADE_FILL_DEADLINE_S = 890
+
+# ── TIME FILTERS (mirrored from underdog) ──
+SKIP_HOURS = set()
+OVERNIGHT_START_HOUR = 20
+OVERNIGHT_END_HOUR = 8
+EARLY_OVERNIGHT_MIN_BID = 55
+FADE_OVERNIGHT_ENABLED = True
+
+# ── KELLY SIZING ──
+STARTING_BALANCE_CENTS = 10000       # $100
+KELLY_FRACTION = 0.5                 # Half-Kelly (conservative — full Kelly is too volatile)
+KELLY_MIN_CONTRACTS = 1              # Floor: always bet at least 1 contract
+KELLY_MAX_CONTRACTS = 20             # Ceiling: cap even if Kelly says more
+KELLY_MIN_EDGE = 0.02               # Don't bet if estimated edge < 2%
+
+# Underdog history path (read-only — for bootstrapping win rate estimates)
+UNDERDOG_HISTORY_PATH = str(_pathlib.Path(__file__).parent.parent / "trade_underdog" / "data" / "underdog_history.jsonl")
 
 # ── FILL TRACKING ──
 FILL_TOLERANCE_CENTS = 2

@@ -1,6 +1,6 @@
 """
-Fade Bot — Entry Point
-Enrichment-gated high-ratio fade strategy on 15-min crypto markets.
+Kelly Bot — Entry Point
+Underdog strategy clone with Kelly criterion position sizing.
 
 Usage:
     python -m trade_fade.main
@@ -17,7 +17,7 @@ from trade_fade.fade_executor import FadeExecutor
 
 
 def main():
-    print("\n  Initializing Kalshi API client for fade bot...")
+    print("\n  Initializing Kalshi API client for Kelly bot...")
     auth = KalshiAuth(KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PATH)
     client = KalshiClient(auth)
 

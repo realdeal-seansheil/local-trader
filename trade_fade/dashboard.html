@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Fade Bot — P&L Dashboard</title>
+<title>Kelly Bot — P&L Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -13,7 +13,11 @@
     display: flex; justify-content: space-between; align-items: center;
     padding: 16px 24px; border-bottom: 1px solid #1a1a2e;
   }
-  .header h1 { font-size: 18px; color: #ce93d8; }
+  .header h1 { font-size: 18px; color: #4fc3f7; }
+  .header .balance { font-size: 22px; font-weight: 700; margin-left: 16px; }
+  .header .balance.positive { color: #00c853; }
+  .header .balance.negative { color: #ff1744; }
+  .header .balance.neutral { color: #aaa; }
   .header .status { font-size: 13px; color: #666; }
   .header .status.live { color: #00c853; }
 
@@ -27,7 +31,7 @@
     font-family: inherit; transition: all 0.2s;
   }
   .controls button:hover { background: #2a2a3e; color: #fff; }
-  .controls button.active { background: #2a1a3a; color: #ce93d8; border-color: #ce93d8; }
+  .controls button.active { background: #1a2a3a; color: #4fc3f7; border-color: #4fc3f7; }
   .controls .sep { width: 1px; height: 24px; background: #2a2a3e; }
   .controls label { font-size: 12px; color: #666; margin-left: 8px; }
 
@@ -54,6 +58,7 @@
   .win { color: #00c853; }
   .loss { color: #ff1744; }
   .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
+  .tag.early { background: #1a2a3a; color: #4fc3f7; }
   .tag.fade { background: #2a1a3a; color: #ce93d8; }
   .tag.pending { background: #2a2a1a; color: #ffd54f; }
   .tag.filled { background: #1a3a1a; color: #00c853; }
@@ -63,7 +68,8 @@
 <body>
 
 <div class="header">
-  <h1>FADE BOT</h1>
+  <h1>KELLY BOT</h1>
+  <span class="balance neutral" id="balance">$100.00</span>
   <div class="status" id="status">Loading...</div>
 </div>
 
@@ -90,7 +96,7 @@
   <div class="table-wrap" style="min-width:100%;margin-bottom:8px;">
     <h3>Open Positions</h3>
     <table id="positions-table">
-      <thead><tr><th>Status</th><th>Ticker</th><th>Side</th><th>Price</th><th>Fav</th><th>Qty</th><th>Wagered</th><th>Entry Time</th><th>Gates</th></tr></thead>
+      <thead><tr><th>Status</th><th>Ticker</th><th>Strategy</th><th>Side</th><th>Price</th><th>Qty</th><th>Wagered</th><th>Kelly</th><th>Entry Time</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -99,7 +105,7 @@
   <div class="table-wrap">
     <h3>Recent Settlements</h3>
     <table id="recent-table">
-      <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Price</th><th>Fav</th><th>Wagered</th><th>Result</th><th>P&L</th><th>Gates</th></tr></thead>
+      <thead><tr><th>Time</th><th>Ticker</th><th>Strategy</th><th>Side</th><th>Price</th><th>Qty</th><th>Wagered</th><th>Kelly</th><th>Result</th><th>P&L</th><th>Balance</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -159,6 +165,11 @@ async function loadData() {
     const stateResp = await fetch(STATE_URL + '?t=' + Date.now());
     stateData = await stateResp.json();
     updatePositionsTable();
+    // Update balance headline
+    const bal = (stateData.balance || 10000) / 100;
+    const balEl = document.getElementById('balance');
+    balEl.textContent = '$' + bal.toFixed(2);
+    balEl.className = 'balance ' + (bal > 100 ? 'positive' : bal < 100 ? 'negative' : 'neutral');
   } catch (e) {
     stateData = {};
     updatePositionsTable();
@@ -277,19 +288,20 @@ function updatePositionsTable() {
   tbody.innerHTML = positions.map(p => {
     const statusTag = p._status === 'pending' ? '<span class="tag pending">PENDING</span>' : '<span class="tag filled">FILLED</span>';
     const series = (p.series || '').replace('15M', '').replace('KX', '');
+    const strat = p.strategy === 'early_window' ? '<span class="tag early">EARLY</span>' : '<span class="tag fade">FADE</span>';
     const wagered = ((p.buy_price || 0) * (p.contracts || 0) / 100).toFixed(2);
+    const kellyInfo = `f=${(p.kelly_f || 0).toFixed(2)} e=${(p.kelly_edge || 0).toFixed(3)}`;
     const entryTime = p.order_time ? new Date(p.order_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
-    const gates = `acc=${(p.gate_tape_acc || 0).toFixed(1)} vel=${(p.gate_vel30 || 0).toFixed(0)} cross=${p.gate_cross_agree || '?'} bv=${(p.gate_bid_vel || 0).toFixed(2)}`;
     return `<tr>
       <td>${statusTag}</td>
       <td>${series}</td>
+      <td>${strat}</td>
       <td>${(p.buy_side || '').toUpperCase()}</td>
       <td>${p.buy_price}c</td>
-      <td>${p.favorite_bid || '?'}c</td>
       <td>x${p.contracts}</td>
       <td>$${wagered}</td>
+      <td class="gate-info">${kellyInfo}</td>
       <td>${entryTime}</td>
-      <td class="gate-info">${gates}</td>
     </tr>`;
   }).join('');
 }
@@ -300,20 +312,25 @@ function updateRecentTable(trades) {
   tbody.innerHTML = recent.map(t => {
     const time = new Date(t.settled_time).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
     const series = (t.series || '').replace('15M', '').replace('KX', '');
+    const strat = t.strategy === 'early_window' ? '<span class="tag early">EARLY</span>' : '<span class="tag fade">FADE</span>';
     const pnl = t.pnl_cents || 0;
     const cls = t.won ? 'win' : 'loss';
     const wagered = ((t.buy_price || 0) * (t.contracts || 0) / 100).toFixed(2);
-    const gates = `acc=${(t.gate_tape_acc || 0).toFixed(1)} vel=${(t.gate_vel30 || 0).toFixed(0)} cross=${t.gate_cross_agree || '?'} bv=${(t.gate_bid_vel || 0).toFixed(2)}`;
+    const kellyInfo = `f=${(t.kelly_f || 0).toFixed(2)} p=${(t.kelly_win_prob || 0).toFixed(0)}%`;
+    const balAfter = t.balance_after ? '$' + (t.balance_after / 100).toFixed(2) : '-';
+    const balCls = t.balance_after && t.balance_after > 10000 ? 'win' : t.balance_after && t.balance_after < 10000 ? 'loss' : '';
     return `<tr>
       <td>${time}</td>
       <td>${series}</td>
+      <td>${strat}</td>
       <td>${(t.buy_side || '').toUpperCase()}</td>
       <td>${t.buy_price}c</td>
-      <td>${t.favorite_bid || '?'}c</td>
+      <td>x${t.contracts}</td>
       <td>$${wagered}</td>
+      <td class="gate-info">${kellyInfo}</td>
       <td class="${cls}">${t.won ? 'WIN' : 'LOSS'}</td>
       <td class="${cls}">${pnl >= 0 ? '+' : ''}${pnl}c</td>
-      <td class="gate-info">${gates}</td>
+      <td class="${balCls}">${balAfter}</td>
     </tr>`;
   }).join('');
 }

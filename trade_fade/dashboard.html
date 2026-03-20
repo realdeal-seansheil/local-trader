@@ -55,6 +55,8 @@
   .loss { color: #ff1744; }
   .tag { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 600; }
   .tag.fade { background: #2a1a3a; color: #ce93d8; }
+  .tag.pending { background: #2a2a1a; color: #ffd54f; }
+  .tag.filled { background: #1a3a1a; color: #00c853; }
   .gate-info { font-size: 10px; color: #555; }
 </style>
 </head>
@@ -85,10 +87,19 @@
 <div id="chart-container"></div>
 
 <div class="tables">
+  <div class="table-wrap" style="min-width:100%;margin-bottom:8px;">
+    <h3>Open Positions</h3>
+    <table id="positions-table">
+      <thead><tr><th>Status</th><th>Ticker</th><th>Side</th><th>Price</th><th>Fav</th><th>Qty</th><th>Wagered</th><th>Entry Time</th><th>Gates</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</div>
+<div class="tables">
   <div class="table-wrap">
     <h3>Recent Settlements</h3>
     <table id="recent-table">
-      <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Price</th><th>Fav</th><th>Result</th><th>P&L</th><th>Gates</th></tr></thead>
+      <thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Price</th><th>Fav</th><th>Wagered</th><th>Result</th><th>P&L</th><th>Gates</th></tr></thead>
       <tbody></tbody>
     </table>
   </div>
@@ -96,8 +107,10 @@
 
 <script>
 const DATA_URL = './data/fade_history.jsonl';
+const STATE_URL = './data/fade_state.json';
 
 let allTrades = [];
+let stateData = {};
 let currentView = 'cumulative';
 let chart, mainSeries;
 let refreshTimer = null;
@@ -139,6 +152,16 @@ async function loadData() {
   } catch (e) {
     document.getElementById('status').textContent = 'No data yet (waiting for first settlement)';
     document.getElementById('status').className = 'status';
+  }
+
+  // Load state (open positions)
+  try {
+    const stateResp = await fetch(STATE_URL + '?t=' + Date.now());
+    stateData = await stateResp.json();
+    updatePositionsTable();
+  } catch (e) {
+    stateData = {};
+    updatePositionsTable();
   }
 }
 
@@ -233,6 +256,44 @@ function updateChart(trades) {
   chart.timeScale().fitContent();
 }
 
+function updatePositionsTable() {
+  const tbody = document.querySelector('#positions-table tbody');
+  const pending = stateData.pending_orders || {};
+  const filled = stateData.filled_positions || {};
+
+  const positions = [];
+  for (const [ticker, pos] of Object.entries(pending)) {
+    positions.push({ ...pos, _status: 'pending' });
+  }
+  for (const [ticker, pos] of Object.entries(filled)) {
+    positions.push({ ...pos, _status: 'filled' });
+  }
+
+  if (!positions.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="color:#555;text-align:center;padding:12px;">No open positions</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = positions.map(p => {
+    const statusTag = p._status === 'pending' ? '<span class="tag pending">PENDING</span>' : '<span class="tag filled">FILLED</span>';
+    const series = (p.series || '').replace('15M', '').replace('KX', '');
+    const wagered = ((p.buy_price || 0) * (p.contracts || 0) / 100).toFixed(2);
+    const entryTime = p.order_time ? new Date(p.order_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+    const gates = `acc=${(p.gate_tape_acc || 0).toFixed(1)} vel=${(p.gate_vel30 || 0).toFixed(0)} cross=${p.gate_cross_agree || '?'} bv=${(p.gate_bid_vel || 0).toFixed(2)}`;
+    return `<tr>
+      <td>${statusTag}</td>
+      <td>${series}</td>
+      <td>${(p.buy_side || '').toUpperCase()}</td>
+      <td>${p.buy_price}c</td>
+      <td>${p.favorite_bid || '?'}c</td>
+      <td>x${p.contracts}</td>
+      <td>$${wagered}</td>
+      <td>${entryTime}</td>
+      <td class="gate-info">${gates}</td>
+    </tr>`;
+  }).join('');
+}
+
 function updateRecentTable(trades) {
   const tbody = document.querySelector('#recent-table tbody');
   const recent = trades.slice(-25).reverse();
@@ -241,6 +302,7 @@ function updateRecentTable(trades) {
     const series = (t.series || '').replace('15M', '').replace('KX', '');
     const pnl = t.pnl_cents || 0;
     const cls = t.won ? 'win' : 'loss';
+    const wagered = ((t.buy_price || 0) * (t.contracts || 0) / 100).toFixed(2);
     const gates = `acc=${(t.gate_tape_acc || 0).toFixed(1)} vel=${(t.gate_vel30 || 0).toFixed(0)} cross=${t.gate_cross_agree || '?'} bv=${(t.gate_bid_vel || 0).toFixed(2)}`;
     return `<tr>
       <td>${time}</td>
@@ -248,6 +310,7 @@ function updateRecentTable(trades) {
       <td>${(t.buy_side || '').toUpperCase()}</td>
       <td>${t.buy_price}c</td>
       <td>${t.favorite_bid || '?'}c</td>
+      <td>$${wagered}</td>
       <td class="${cls}">${t.won ? 'WIN' : 'LOSS'}</td>
       <td class="${cls}">${pnl >= 0 ? '+' : ''}${pnl}c</td>
       <td class="gate-info">${gates}</td>
